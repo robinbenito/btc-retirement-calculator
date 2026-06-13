@@ -202,6 +202,7 @@ function merge(A, B) {
     e[pre + "V"] = r.value; e[pre + "VR"] = r.valueReal; e[pre + "B"] = r.btc;
     e[pre + "S"] = r.sats; e[pre + "Buy"] = r.buySats; e[pre + "Sell"] = r.sellSats;
     e[pre + "FlowSats"] = r.flowSatsYr; e[pre + "FlowKind"] = r.flowKind; e[pre + "Cash"] = r.cashYr;
+    e[pre + "Price"] = r.price;
     m.set(r.age, e);
   });
   add(A.timeline, "a"); if (B) add(B.timeline, "b");
@@ -326,6 +327,22 @@ function calcForever(p, model, accBtcIn = null) {
     reqValue: (p.spend * m) / realReturn,
   }));
   return { possible: true, reqBtc, reqValue, accBtc, neededDCA, impliedCagr, realReturn, p0, sensitivity };
+}
+function calcForeverCurve(p, model, endAge) {
+  const ageMax = Math.min((endAge ?? 120) - 1, 85);
+  const rows = [];
+  for (let ra = p.age + 1; ra <= ageMax; ra++) {
+    const y = ra - p.age;
+    const p0 = priceAt(y, model);
+    const WIN = 10;
+    const impliedCagr = Math.pow(priceAt(y + WIN, model) / p0, 1 / WIN) - 1;
+    const realReturn = impliedCagr - p.infl;
+    if (realReturn <= 0.001) { rows.push({ age: ra, reqBtc: null, accBtc: null }); continue; }
+    const reqBtc = (p.spend / realReturn) / p0;
+    const accBtc = accumulateBtc(p.btc, p.monthly, y, model);
+    rows.push({ age: ra, reqBtc, accBtc });
+  }
+  return rows;
 }
 function solveForeverBtc(income, bridgeEndAge, age0, infl, model, endAge) {
   const survives = (startBtc) => {
@@ -530,10 +547,12 @@ function TTvalue({ active, payload, sym, real, compare }) {
   if (!compare) return ttBox(d.age, <>
     <div style={{ color: C.orange }}>{fmtMoney(real ? d.valueReal : d.value, sym)}{real ? " · today's $" : ""}</div>
     <div style={{ color: C.inkDim }}>{fmtBtc(d.btc)} · {fmtSats(d.sats)}</div>
+    {d.price != null && <div style={{ color: C.blue, marginTop: 2 }}>BTC {fmtMoney(d.price, sym)}</div>}
   </>);
   return ttBox(d.age, <>
     <div style={{ color: C.orange }}>A {fmtMoney(real ? d.aVR : d.aV, sym)} · {fmtSats(d.aS)}</div>
     <div style={{ color: C.blue }}>B {fmtMoney(real ? d.bVR : d.bV, sym)} · {fmtSats(d.bS)}</div>
+    {d.aPrice != null && <div style={{ color: C.inkDim, marginTop: 2, fontSize: 11 }}>BTC {fmtMoney(d.aPrice, sym)}</div>}
   </>);
 }
 function PortfolioChart({ data, retireAge, pivotAge, pivotLabel, real, cur, onMouseMove, pinCursor, shockOn, shockX2, height }) {
@@ -560,6 +579,7 @@ function PortfolioChart({ data, retireAge, pivotAge, pivotLabel, real, cur, onMo
             label={{ value: pivotLabel ?? "pivot", fill: C.green, fontSize: 10, position: "insideTopRight" }} />
         )}
         <Area yAxisId="val" type="monotone" name="Value" dataKey={real ? "valueReal" : "value"} stroke={C.orange} strokeWidth={2} fill="url(#pcGrad)" />
+        <Line yAxisId="val" type="monotone" name="BTC price" dataKey="price" stroke={C.blue} strokeWidth={1.5} dot={false} strokeDasharray="2 4" opacity={0.8} />
         <Line yAxisId="btc" type="monotone" name="BTC" dataKey="btc" stroke={C.gold} strokeWidth={1.5} dot={false} strokeDasharray="5 3" opacity={0.8} />
       </ComposedChart>
     </ResponsiveContainer>
@@ -860,6 +880,7 @@ export default function App() {
   // accumulation as the main simulation rather than the coarser annual approximation
   const fvrA = useMemo(() => calcForever(normalize(scen.A), sharedModel, rA.retStack), [scen.A, sharedModel, rA]);
   const fvrB = useMemo(() => compare && rB ? calcForever(normalize(scen.B), modelOf(scen.B), rB.retStack) : null, [scen.B, compare, rB]);
+  const fvrCurve = useMemo(() => calcForeverCurve(normalize(scen.A), sharedModel, scen.A.endAge), [scen.A, sharedModel]);
 
   /* ── Bridge stack (always computed; inherits age/btc/monthly/infl from scen.A) ── */
   const brdInput = useMemo(() => ({
@@ -1199,118 +1220,9 @@ export default function App() {
           {/* ── RESULTS ── */}
           <section style={{ display: "flex", flexDirection: "column", gap: 22 }}>
 
-            {/* ① SNAPSHOT — primary answer */}
-            <div className="card fade" style={{ padding: 24, position: "relative", overflow: "hidden" }}>
-              {!compare && (
-                <div style={{ position: "absolute", inset: 0, background: rA.lasts
-                  ? "radial-gradient(500px 200px at 80% 0%, rgba(127,176,105,.10), transparent 70%)"
-                  : "radial-gradient(500px 200px at 80% 0%, rgba(217,104,91,.10), transparent 70%)" }} />
-              )}
-              <div style={{ position: "relative" }}>
-                {!compare ? (
-                  <>
-                    <div style={{ display: "inline-flex", alignItems: "center", gap: 8,
-                      fontFamily: "'IBM Plex Mono',monospace", fontSize: 13,
-                      color: rA.lasts ? C.green : C.red, marginBottom: 18 }}>
-                      <Dot c={rA.lasts ? C.green : C.red} />
-                      {rA.lasts
-                        ? `Plan holds — stack survives past age ${normalize(scen.A).endAge}`
-                        : `Stack runs dry at age ${rA.depletedAge}`}
-                    </div>
-                    <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
-                      <Stat label="Stack at retirement" big={fmtBtc(rA.retStack)} sub={`from ₿${p.btc} + DCA`} color={C.orange} />
-                      <Stat label={`Value at ${p.retireAge}`} big={fmtMoney(rA.retValue, cur)}
-                        sub={`≈ ${fmtMoney(rA.retValueReal, cur)} in today's money`} color={C.gold} />
-                      <Stat label="Implied BTC price then" big={fmtMoney(rA.retPrice, cur)}
-                        sub={`${cur}${Math.round(p.spot).toLocaleString()} today`} />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 4 }}>
-                      <div style={{ flex: "1.3 1 0", minWidth: 0, fontFamily: "'Fraunces',serif", fontSize: "clamp(18px,4.5vw,22px)", fontWeight: 600 }}>Scenario A vs B</div>
-                      <div style={{ flex: "1 1 0", minWidth: 0, textAlign: "right", color: C.orange, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}><Dot c={C.orange} /> A</div>
-                      <div style={{ flex: "1 1 0", minWidth: 0, textAlign: "right", color: C.blue, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}><Dot c={C.blue} /> B</div>
-                    </div>
-                    <CmpRow label="Stack at retirement" a={fmtBtc(rA.retStack)} b={fmtBtc(rB.retStack)} ca={C.orange} cb={C.blue} />
-                    <CmpRow label="Value at retirement" a={fmtMoney(rA.retValue, cur)} b={fmtMoney(rB.retValue, cur)} ca={C.orange} cb={C.blue} />
-                    <CmpRow label="… in today's money" a={fmtMoney(rA.retValueReal, cur)} b={fmtMoney(rB.retValueReal, cur)} ca={C.inkDim} cb={C.inkDim} />
-                    <CmpRow label="Outlook"
-                      a={<span style={{ color: rA.lasts ? C.green : C.red }}>{rA.lasts ? "holds" : `dry @ ${rA.depletedAge}`}</span>}
-                      b={<span style={{ color: rB.lasts ? C.green : C.red }}>{rB.lasts ? "holds" : `dry @ ${rB.depletedAge}`}</span>}
-                      ca={C.orange} cb={C.blue} />
-                  </>
-                )}
-                {!compare && (
-                  <div style={{ marginTop: 16, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: shock.on ? 12 : 0 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11,
-                        color: shock.on ? C.red : C.inkDim, letterSpacing: ".06em", flex: 1 }}>⚡ stress test</span>
-                      <button className={`seg ${!shock.on ? "on" : ""}`}
-                        onClick={() => setShock(s => ({ ...s, on: false }))}
-                        style={{ padding: "3px 10px", fontSize: 11 }}>Off</button>
-                      <button className={`seg ${shock.on ? "on" : ""}`}
-                        onClick={() => setShock(s => ({ ...s, on: true }))}
-                        style={{ padding: "3px 10px", fontSize: 11 }}>On</button>
-                    </div>
-                    {shock.on && (() => {
-                      const base = simulate(normalize(scen.A, { ...shock, on: false }));
-                      return (
-                        <div className="fade">
-                          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
-                            <div style={{ flex: 1, minWidth: 120 }}>
-                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginBottom: 4 }}>
-                                Crash: −{(shock.depth * 100).toFixed(0)}%
-                              </div>
-                              <input type="range" min={0.3} max={0.9} step={0.05} value={shock.depth}
-                                onChange={(e) => setShock(s => ({ ...s, depth: parseFloat(e.target.value) }))}
-                                className="btc-range" style={{ width: "100%" }} />
-                            </div>
-                            <div style={{ flex: 1, minWidth: 120 }}>
-                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginBottom: 4 }}>
-                                Recovery: {shock.recovery} yr{shock.recovery > 1 ? "s" : ""}
-                              </div>
-                              <input type="range" min={1} max={10} step={1} value={shock.recovery}
-                                onChange={(e) => setShock(s => ({ ...s, recovery: parseFloat(e.target.value) }))}
-                                className="btc-range" style={{ width: "100%" }} />
-                            </div>
-                          </div>
-                          <div style={{ padding: "10px 12px", background: "rgba(217,104,91,.08)",
-                            border: `1px solid ${C.red}`, borderRadius: 8 }}>
-                            <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-                              <div>
-                                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint,
-                                  marginBottom: 3, textTransform: "uppercase", letterSpacing: ".1em" }}>Value at retirement</div>
-                                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
-                                  <span style={{ color: C.inkDim, textDecoration: "line-through" }}>{fmtMoney(base.retValue, cur)}</span>
-                                  <span style={{ color: C.red, marginLeft: 8 }}>→ {fmtMoney(rA.retValue, cur)}</span>
-                                </div>
-                              </div>
-                              <div>
-                                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint,
-                                  marginBottom: 3, textTransform: "uppercase", letterSpacing: ".1em" }}>Outlook</div>
-                                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
-                                  <span style={{ color: C.inkDim, textDecoration: "line-through" }}>
-                                    {base.lasts ? `holds to ${normalize(scen.A).endAge}` : `dry @ ${base.depletedAge}`}
-                                  </span>
-                                  <span style={{ color: rA.lasts ? C.green : C.red, marginLeft: 8 }}>
-                                    → {rA.lasts ? `holds to ${normalize(scen.A).endAge}` : `dry @ ${rA.depletedAge}`}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* ② PORTFOLIO CHART / BRIDGE */}
+            {/* ① PORTFOLIO + SNAPSHOT (merged) */}
             <div className="card fade" style={{ padding: "20px 18px 16px",
-              borderLeft: brd.show ? `3px solid ${C.green}` : undefined }}>
+              borderLeft: brd.show ? `3px solid ${C.green}` : !compare ? (rA.lasts ? `3px solid ${C.green}` : `3px solid ${C.red}`) : undefined }}>
               {brd.show && (
                 brdResult.impossible ? (
                   <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: C.red, lineHeight: 1.5 }}>
@@ -1353,11 +1265,25 @@ export default function App() {
                 )
               )}
               {!brd.show && <>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 4px", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em",
-                  textTransform: "uppercase", color: C.inkDim }}>Portfolio value over life</div>
+              {/* Status + key stats */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+                {!compare ? (
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 8,
+                    fontFamily: "'IBM Plex Mono',monospace", fontSize: 13,
+                    color: rA.lasts ? C.green : C.red }}>
+                    <Dot c={rA.lasts ? C.green : C.red} />
+                    {rA.lasts
+                      ? `Plan holds · survives past age ${normalize(scen.A).endAge}`
+                      : `Stack runs dry at age ${rA.depletedAge}`}
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.orange }}><Dot c={C.orange} /> A {rA.lasts ? <span style={{ color: C.green }}>holds</span> : <span style={{ color: C.red }}>dry @{rA.depletedAge}</span>}</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.blue }}><Dot c={C.blue} /> B {rB && (rB.lasts ? <span style={{ color: C.green }}>holds</span> : <span style={{ color: C.red }}>dry @{rB.depletedAge}</span>)}</span>
+                  </div>
+                )}
                 {!mc ? (
-                  <div style={{ display: "flex", gap: 4 }}>
+                  <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
                     <button className={`seg ${!real ? "on" : ""}`} onClick={() => setReal(false)}>Nominal</button>
                     <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>Today's $</button>
                   </div>
@@ -1369,6 +1295,26 @@ export default function App() {
                   </div>
                 )}
               </div>
+              {!mc && !compare ? (
+                <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 4 }}>
+                  <Stat label="Stack at retirement" big={fmtBtc(rA.retStack)} sub={`from ₿${p.btc} + DCA`} color={C.orange} />
+                  <Stat label={`Value at ${p.retireAge}`} big={fmtMoney(rA.retValue, cur)}
+                    sub={`≈ ${fmtMoney(rA.retValueReal, cur)} today`} color={C.gold} />
+                  <Stat label="BTC price then" big={fmtMoney(rA.retPrice, cur)}
+                    sub={`${cur}${Math.round(p.spot).toLocaleString()} today`} />
+                </div>
+              ) : !mc && compare ? (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 4 }}>
+                    <div style={{ flex: "1.3 1 0" }} />
+                    <div style={{ flex: "1 1 0", textAlign: "right", color: C.orange, fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>A</div>
+                    <div style={{ flex: "1 1 0", textAlign: "right", color: C.blue, fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>B</div>
+                  </div>
+                  <CmpRow label="Stack at retirement" a={fmtBtc(rA.retStack)} b={fmtBtc(rB.retStack)} ca={C.orange} cb={C.blue} />
+                  <CmpRow label="Value at retirement" a={fmtMoney(rA.retValue, cur)} b={fmtMoney(rB.retValue, cur)} ca={C.orange} cb={C.blue} />
+                  <CmpRow label="… in today's money" a={fmtMoney(rA.retValueReal, cur)} b={fmtMoney(rB.retValueReal, cur)} ca={C.inkDim} cb={C.inkDim} />
+                </div>
+              ) : null}
 
               {!mc ? (
                 <>
@@ -1391,6 +1337,7 @@ export default function App() {
                         <ReferenceLine yAxisId="val" x={normalize(scen.A).retireAge} stroke={C.gold} strokeDasharray="3 3" />
                         <Line yAxisId="val" type="monotone" name="A value" dataKey={"a" + VK} stroke={C.orange} strokeWidth={2} dot={false} connectNulls />
                         <Line yAxisId="val" type="monotone" name="B value" dataKey={"b" + VK} stroke={C.blue} strokeWidth={2} dot={false} connectNulls />
+                        <Line yAxisId="val" type="monotone" name="BTC price" dataKey="aPrice" stroke={C.inkDim} strokeWidth={1.5} dot={false} strokeDasharray="2 4" opacity={0.7} connectNulls />
                         <Line yAxisId="btc" type="monotone" name="A BTC" dataKey="aB" stroke={C.orange} strokeWidth={1.5} dot={false} strokeDasharray="5 3" opacity={0.6} connectNulls />
                         <Line yAxisId="btc" type="monotone" name="B BTC" dataKey="bB" stroke={C.blue} strokeWidth={1.5} dot={false} strokeDasharray="5 3" opacity={0.6} connectNulls />
                       </ComposedChart>
@@ -1461,6 +1408,72 @@ export default function App() {
               )}
 
               <PinTable row={pinRow} view={pinView} real={real} sym={cur} />
+
+              {/* Stress test */}
+              {!compare && !mc && (
+                <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: shock.on ? 12 : 0 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11,
+                      color: shock.on ? C.red : C.inkDim, letterSpacing: ".06em", flex: 1 }}>⚡ stress test</span>
+                    <button className={`seg ${!shock.on ? "on" : ""}`}
+                      onClick={() => setShock(s => ({ ...s, on: false }))}
+                      style={{ padding: "3px 10px", fontSize: 11 }}>Off</button>
+                    <button className={`seg ${shock.on ? "on" : ""}`}
+                      onClick={() => setShock(s => ({ ...s, on: true }))}
+                      style={{ padding: "3px 10px", fontSize: 11 }}>On</button>
+                  </div>
+                  {shock.on && (() => {
+                    const base = simulate(normalize(scen.A, { ...shock, on: false }));
+                    return (
+                      <div className="fade">
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+                          <div style={{ flex: 1, minWidth: 120 }}>
+                            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginBottom: 4 }}>
+                              Crash: −{(shock.depth * 100).toFixed(0)}%
+                            </div>
+                            <input type="range" min={0.3} max={0.9} step={0.05} value={shock.depth}
+                              onChange={(e) => setShock(s => ({ ...s, depth: parseFloat(e.target.value) }))}
+                              className="btc-range" style={{ width: "100%" }} />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 120 }}>
+                            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginBottom: 4 }}>
+                              Recovery: {shock.recovery} yr{shock.recovery > 1 ? "s" : ""}
+                            </div>
+                            <input type="range" min={1} max={10} step={1} value={shock.recovery}
+                              onChange={(e) => setShock(s => ({ ...s, recovery: parseFloat(e.target.value) }))}
+                              className="btc-range" style={{ width: "100%" }} />
+                          </div>
+                        </div>
+                        <div style={{ padding: "10px 12px", background: "rgba(217,104,91,.08)",
+                          border: `1px solid ${C.red}`, borderRadius: 8 }}>
+                          <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+                            <div>
+                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint,
+                                marginBottom: 3, textTransform: "uppercase", letterSpacing: ".1em" }}>Value at retirement</div>
+                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
+                                <span style={{ color: C.inkDim, textDecoration: "line-through" }}>{fmtMoney(base.retValue, cur)}</span>
+                                <span style={{ color: C.red, marginLeft: 8 }}>→ {fmtMoney(rA.retValue, cur)}</span>
+                              </div>
+                            </div>
+                            <div>
+                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint,
+                                marginBottom: 3, textTransform: "uppercase", letterSpacing: ".1em" }}>Outlook</div>
+                              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
+                                <span style={{ color: C.inkDim, textDecoration: "line-through" }}>
+                                  {base.lasts ? `holds to ${normalize(scen.A).endAge}` : `dry @ ${base.depletedAge}`}
+                                </span>
+                                <span style={{ color: rA.lasts ? C.green : C.red, marginLeft: 8 }}>
+                                  → {rA.lasts ? `holds to ${normalize(scen.A).endAge}` : `dry @ ${rA.depletedAge}`}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
 
               {/* volatility calculation — bottom disclosure */}
               <div style={{ marginTop: 16, borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
@@ -1535,29 +1548,28 @@ export default function App() {
                     </div>
                   )}
                   {!compare ? (
-                    <>
-                      <button onClick={() => setShowSens(s => !s)} style={{ background: "none", border: "none", cursor: "pointer",
-                        fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkDim, padding: "0 0 10px", display: "block" }}>
-                        {showSens ? "▾ Hide sensitivity" : "▸ Show sensitivity"}
-                      </button>
-                      {showSens && (
-                        <>
-                          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8, padding: "4px 0 8px",
-                            fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.inkDim }}>
-                            <span>Annual income</span><span style={{ textAlign: "right" }}>Req. BTC</span><span style={{ textAlign: "right" }}>Req. value at retire</span>
-                          </div>
-                          {fvrA.sensitivity.map(row => (
-                            <div key={row.income} style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8, padding: "7px 6px",
-                              borderTop: `1px solid ${C.line}`, borderRadius: 6,
-                              background: Math.abs(row.income - p.spend) < 1 ? "rgba(247,147,26,0.08)" : "transparent" }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13 }}>{fmtMoney(row.income, cur)}</span>
-                              <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, textAlign: "right", color: C.orange }}>{fmtBtc(row.reqBtc)}</span>
-                              <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, textAlign: "right", color: C.gold }}>{fmtMoney(row.reqValue, cur)}</span>
-                            </div>
-                          ))}
-                        </>
-                      )}
-                    </>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <ComposedChart data={fvrCurve} margin={{ top: 8, right: 8, bottom: 0, left: -10 }}>
+                        <defs>
+                          <linearGradient id="grnFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={C.green} stopOpacity={0.25} />
+                            <stop offset="95%" stopColor={C.green} stopOpacity={0.03} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid stroke={C.line} vertical={false} />
+                        <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
+                        <YAxis stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false}
+                          tickFormatter={v => v >= 1 ? `${v.toFixed(0)}` : v >= 0.01 ? v.toFixed(2) : v.toFixed(3)} />
+                        <Tooltip
+                          contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12, fontFamily: "IBM Plex Mono" }}
+                          labelFormatter={l => `Age ${l}`}
+                          formatter={(v, name) => [fmtBtc(v), name]}
+                        />
+                        <Area type="monotone" dataKey="accBtc" name="Stack" fill="url(#grnFill)" stroke={C.green} strokeWidth={2} dot={false} />
+                        <Line type="monotone" dataKey="reqBtc" name="Need" stroke={C.orange} strokeWidth={1.5} strokeDasharray="5 3" dot={false} connectNulls={false} />
+                        <ReferenceLine x={p.retireAge} stroke={C.gold} strokeDasharray="3 3" label={{ value: `${p.retireAge}`, position: "insideTopRight", fill: C.gold, fontSize: 10, fontFamily: "IBM Plex Mono" }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
                   ) : fvrB && fvrB.possible ? (
                     <>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 4 }}>
