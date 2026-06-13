@@ -547,7 +547,7 @@ function TTvalue({ active, payload, sym, real, compare }) {
 function PortfolioChart({ data, retireAge, pivotAge, pivotLabel, real, cur, onMouseMove, pinCursor, shockOn, shockX2, height }) {
   return (
     <ResponsiveContainer width="100%" height={height ?? 270}>
-      <ComposedChart data={data} onMouseMove={onMouseMove} margin={{ top: 14, right: 54, left: 4, bottom: 0 }}>
+      <ComposedChart data={data} onMouseMove={onMouseMove} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
         <defs>
           <linearGradient id="pcGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={C.orange} stopOpacity={0.45} />
@@ -1317,7 +1317,7 @@ export default function App() {
                     />
                   ) : (
                     <ResponsiveContainer width="100%" height={270}>
-                      <ComposedChart data={merged} onMouseMove={onPin} margin={{ top: 14, right: 54, left: 4, bottom: 0 }}>
+                      <ComposedChart data={merged} onMouseMove={onPin} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
                         <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
                         <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
                         <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
@@ -1346,7 +1346,7 @@ export default function App() {
                       sub={`median ${fmtMoney(mc.B.medianTerminal, cur)}`} />
                   </div>
                   <ResponsiveContainer width="100%" height={240}>
-                    <ComposedChart data={mc.fanC} onMouseMove={onPin} margin={{ top: 10, right: 54, left: 4, bottom: 0 }}>
+                    <ComposedChart data={mc.fanC} onMouseMove={onPin} margin={{ top: 10, right: 8, left: 4, bottom: 0 }}>
                       <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
                       <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
                       <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
@@ -1377,7 +1377,7 @@ export default function App() {
                     <Stat label="Unlucky · 10th pct" big={fmtMoney(mc.p10Terminal, cur)} sub="today's money" color={C.inkDim} />
                   </div>
                   <ResponsiveContainer width="100%" height={240}>
-                    <ComposedChart data={mc.fan} onMouseMove={onPin} margin={{ top: 10, right: 54, left: 4, bottom: 0 }}>
+                    <ComposedChart data={mc.fan} onMouseMove={onPin} margin={{ top: 10, right: 8, left: 4, bottom: 0 }}>
                       <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
                       <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
                       <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
