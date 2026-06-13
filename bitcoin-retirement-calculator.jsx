@@ -311,35 +311,24 @@ function solveMonthlyDCA(startBtc, targetBtc, years, model) {
 function calcForever(p, model, accBtcIn = null) {
   const y = Math.max(1, p.retireAge - p.age);
   const p0 = priceAt(y, model);
-  // Use 10-year window for the implied CAGR post-retirement — more conservative than a 3-year snapshot
-  // because power-law growth rate tapers and the 3-year figure would overstate sustainable yield
+  const endAgeEff = p.endAge ?? 120;
   const WIN = 10;
   const impliedCagr = Math.pow(priceAt(y + WIN, model) / p0, 1 / WIN) - 1;
   const realReturn = impliedCagr - p.infl;
-  if (realReturn <= 0.001) return { possible: false, impliedCagr, realReturn };
-  const reqValue = p.spend / realReturn;
-  const reqBtc = reqValue / p0;
+  // Required BTC solved via the same year-by-year depletion model as simulate()
+  const reqBtc = solveForeverBtc(p.spend, p.retireAge, p.age, p.infl, model, endAgeEff);
+  const reqValue = reqBtc * p0;
   const accBtc = accBtcIn !== null ? accBtcIn : accumulateBtc(p.btc, p.monthly, y, model);
   const neededDCA = reqBtc > accBtc ? solveMonthlyDCA(p.btc, reqBtc, y, model) : null;
-  const sensitivity = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(m => ({
-    income: Math.round(p.spend * m),
-    reqBtc: (p.spend * m) / realReturn / p0,
-    reqValue: (p.spend * m) / realReturn,
-  }));
-  return { possible: true, reqBtc, reqValue, accBtc, neededDCA, impliedCagr, realReturn, p0, sensitivity };
+  return { possible: true, reqBtc, reqValue, accBtc, neededDCA, impliedCagr, realReturn, p0 };
 }
 function calcForeverCurve(p, model, endAge) {
-  const ageMax = Math.min((endAge ?? 120) - 1, 85);
+  const endAgeEff = endAge ?? 120;
+  const ageMax = Math.min(endAgeEff - 1, 85);
   const rows = [];
   for (let ra = p.age + 1; ra <= ageMax; ra++) {
-    const y = ra - p.age;
-    const p0 = priceAt(y, model);
-    const WIN = 10;
-    const impliedCagr = Math.pow(priceAt(y + WIN, model) / p0, 1 / WIN) - 1;
-    const realReturn = impliedCagr - p.infl;
-    if (realReturn <= 0.001) { rows.push({ age: ra, reqBtc: null, accBtc: null }); continue; }
-    const reqBtc = (p.spend / realReturn) / p0;
-    const accBtc = accumulateBtc(p.btc, p.monthly, y, model);
+    const accBtc = accumulateBtc(p.btc, p.monthly, ra - p.age, model);
+    const reqBtc = solveForeverBtc(p.spend, ra, p.age, p.infl, model, endAgeEff);
     rows.push({ age: ra, reqBtc, accBtc });
   }
   return rows;
@@ -1531,14 +1520,9 @@ export default function App() {
               <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.green, marginBottom: 14 }}>
                 Forever Stack
               </div>
-              {!fvrA.possible ? (
-                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: C.red, lineHeight: 1.5, padding: "12px 14px", background: "rgba(217,104,91,.08)", borderRadius: 8 }}>
-                  BTC real return ≤ inflation at this model — perpetual income not achievable. Try a higher exponent or lower inflation.
-                </div>
-              ) : (
-                <>
+              <>
                   <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 18 }}>
-                    <Stat label="Required BTC" big={fmtBtc(fvrA.reqBtc)} sub="for perpetual income" color={C.orange} />
+                    <Stat label="Required BTC" big={fmtBtc(fvrA.reqBtc)} sub={`to survive to age ${normalize(scen.A).endAge}`} color={C.orange} />
                     <Stat label="You'll have" big={fmtBtc(fvrA.accBtc)} sub={fvrA.accBtc >= fvrA.reqBtc ? "surplus ✓" : "short of target"} color={fvrA.accBtc >= fvrA.reqBtc ? C.green : C.red} />
                     <Stat label="Implied real return" big={`${(fvrA.realReturn * 100).toFixed(1)}%/yr`} sub="BTC CAGR − inflation" color={C.gold} />
                   </div>
@@ -1584,8 +1568,7 @@ export default function App() {
                   ) : fvrB && !fvrB.possible ? (
                     <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.red }}>Scenario B: real return ≤ inflation — perpetual income not achievable.</div>
                   ) : null}
-                </>
-              )}
+              </>
             </div>
 
           </section>
