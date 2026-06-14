@@ -123,6 +123,29 @@ async function fetchWorldBankCPI(iso3List) {
   return out;   // { ISO3: { year: index } }
 }
 
+/* Euro-area ISO2 members → our euro sub-country key (null = euro member we don't break out). */
+const EURO_MEMBERS = {
+  AT:"AT", BE:"BE", FI:"FI", FR:"FR", DE:"DE", GR:"GR", IE:"IE", IT:"IT", NL:"NL", PT:"PT", ES:"ES",
+  HR:null, CY:null, EE:null, LV:null, LT:null, LU:null, MT:null, SK:null, SI:null,
+};
+/* Best-effort IP geolocation → ISO2 country code (free, CORS-enabled sources). (#4) */
+async function fetchGeoCountry() {
+  const tries = [
+    { url: "https://ipwho.is/",       pick: j => j.success === false ? null : j.country_code },
+    { url: "https://ipapi.co/json/",  pick: j => j.country_code || j.country },
+    { url: "https://get.geojs.io/v1/ip/country.json", pick: j => j.country },
+  ];
+  for (const t of tries) {
+    try {
+      const r = await fetch(t.url);
+      if (!r.ok) continue;
+      const code = t.pick(await r.json());
+      if (code) return String(code).toUpperCase();
+    } catch (e) { /* try next */ }
+  }
+  return null;
+}
+
 /* Minimal JSON-stat 2.0 reader: returns value at the given dimension-category map. */
 function jsonStatLookup(ds, sel) {
   const dimIds = ds.id || ds.dimension?.id;
@@ -796,6 +819,9 @@ export default function App() {
   const [compare, setCompare] = useState(false);
   const [country, setCountry] = useState("EU");
   const [showCountry, setShowCountry] = useState(false);
+  const [geoDetected, setGeoDetected] = useState(null);   // ISO2 from IP, for the picker hint (#4)
+  const userTouchedCountry = useRef(false);
+  const pickCountry = (k) => { userTouchedCountry.current = true; setCountry(k); };
   const cur = COUNTRIES[country].cur;
   const [tab, setTab] = useState("retirement");
   const [real, setReal] = useState(false);
@@ -942,6 +968,16 @@ export default function App() {
     const fx = live.usd > 0 ? local / live.usd : 1;
     setScen(s => ({ A: { ...s.A, spot: Math.round(local), fxRate: fx }, B: { ...s.B, spot: Math.round(local), fxRate: fx } }));
   };
+
+  /* ── #4: auto-select country/currency from IP (unless the user has already chosen) ── */
+  useEffect(() => { (async () => {
+    const code = await fetchGeoCountry();
+    if (!code) return;
+    setGeoDetected(code);
+    if (userTouchedCountry.current) return;
+    if (COUNTRIES[code]) setCountry(code);
+    else if (EURO_MEMBERS[code] !== undefined) { setCountry("EU"); if (EURO_MEMBERS[code]) setEuroGeo(EURO_MEMBERS[code]); }
+  })(); }, []);
 
   /* ── Live inflation: World Bank headline CPI for every country + euro member (once) ── */
   useEffect(() => { (async () => {
@@ -1260,9 +1296,11 @@ export default function App() {
                 <div className="card fade" style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 100, minWidth: 170, padding: 6 }}>
                   {Object.entries(COUNTRIES).map(([k, v]) => (
                     <button key={k} className={`seg ${country === k ? "on" : ""}`}
-                      onClick={() => { setCountry(k); setShowCountry(false); }}
+                      onClick={() => { pickCountry(k); setShowCountry(false); }}
                       style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", marginBottom: 2 }}>
                       {v.flag} {v.label} <span style={{ marginLeft: "auto", color: C.inkDim }}>{v.cur}</span>
+                      {geoDetected && (COUNTRIES[geoDetected] === v || (k === "EU" && EURO_MEMBERS[geoDetected] !== undefined)) &&
+                        <span style={{ color: C.green, fontSize: 9, marginLeft: 4 }}>📍</span>}
                     </button>
                   ))}
                 </div>
