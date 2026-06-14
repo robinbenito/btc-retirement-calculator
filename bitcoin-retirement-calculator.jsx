@@ -441,6 +441,25 @@ function solveForeverBtc(income, bridgeEndAge, age0, infl, model, endAge) {
   }
   return (lo + hi) / 2;
 }
+// Inverse of solveForeverBtc: given the BTC accumulated by retirement, find the largest
+// inflation-adjusted annual income that still lasts to endAge. Same depletion model. (#2)
+function solveSustainableIncome(startBtc, retireAge, age0, infl, model, endAge) {
+  const survives = (income) => {
+    let stack = startBtc;
+    for (let a = retireAge + 1; a <= endAge; a++) {
+      const y = a - age0;
+      stack -= (income * Math.pow(1 + infl, y)) / priceAt(y, model);
+      if (stack <= 0) return false;
+    }
+    return true;
+  };
+  let lo = 0, hi = 1e8;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    survives(mid) ? lo = mid : hi = mid;
+  }
+  return (lo + hi) / 2;
+}
 // Bridge mode: retireAge is FIXED (when forever income starts).
 // We find the earliest earlyRetireAge where DCA covers foreverBtc + bridge cost.
 // Bridge cost = sum of annual income from earlyRetireAge to retireAge.
@@ -807,6 +826,9 @@ export default function App() {
   const [brd, setBrd] = useState({ show: false, foreverIncome: 48000 });
   const upBrd = (k, v) => setBrd(s => ({ ...s, [k]: v }));
 
+  /* ── #2: auto retirement income — solve sustainable income from a fixed retire age ── */
+  const [autoIncome, setAutoIncome] = useState(false);
+
   /* ── Savings goal state ── */
   const [goal, setGoal] = useState({ name:"Dream Car", category:"car", valueToday:50000, goalInfl:0.045, age:34, currentBtc:0.5, monthly:400 });
   const upGoal = (k, v) => setGoal(s => ({ ...s, [k]: v }));
@@ -1067,6 +1089,24 @@ export default function App() {
   const setInfl = (v) => { setInflOverride(true); up("infl", v); };
   const resetInflAuto = () => { setInflOverride(false); setScen(s => ({ A: { ...s.A, infl: autoInfl }, B: { ...s.B, infl: autoInfl } })); };
 
+  /* ── #2: when auto-income is on, drive each scenario's spend from its accumulated stack.
+     Accumulation is independent of spend, so the rounded solution is a fixed point (no loop). ── */
+  useEffect(() => {
+    if (!autoIncome) return;
+    setScen(s => {
+      let changed = false; const next = { ...s };
+      for (const key of compare ? ["A", "B"] : [active]) {
+        const sc = s[key], m = modelOf(sc), n = normalize(sc);
+        const accBtc = accumulateBtc(sc.btc, sc.monthly, n.retireAge - n.age, m);
+        const inc = Math.round(solveSustainableIncome(accBtc, n.retireAge, n.age, sc.infl, m, n.endAge));
+        if (sc.spend !== inc) { next[key] = { ...sc, spend: inc }; changed = true; }
+      }
+      return changed ? next : s;
+    });
+  }, [autoIncome, active, compare, scen]);
+  const toggleAutoIncome = () => { setAutoIncome(v => !v); if (!autoIncome && brd.show) upBrd("show", false); };
+  const toggleBridge = () => { const next = !brd.show; upBrd("show", next); if (next && autoIncome) setAutoIncome(false); };
+
   /* ── Animated personal inflation for display ── */
   const animInfl = useAnimatedNumber(piResult.youAnnual);
 
@@ -1268,7 +1308,7 @@ export default function App() {
                   textTransform: "uppercase", color: C.inkDim, marginBottom: 7,
                   display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span>Retire at</span>
-                  <button onClick={() => upBrd("show", !brd.show)} style={{
+                  <button onClick={toggleBridge} style={{
                     background: brd.show ? "rgba(127,176,105,.18)" : "rgba(255,255,255,.06)",
                     border: `1px solid ${brd.show ? C.green : C.line}`,
                     borderRadius: 4, padding: "1px 8px", fontSize: 10,
@@ -1284,7 +1324,25 @@ export default function App() {
             </div>
             <Field label="Bitcoin you hold today" suffix="BTC"><NumIn value={p.btc} onChange={(v) => up("btc", v)} prefix="₿" step={0.01} /></Field>
             <Field label="Monthly buy (DCA)" suffix="per month"><NumIn value={p.monthly} onChange={(v) => up("monthly", v)} prefix={cur} step={50} /></Field>
-            <Field label="Retirement income wanted" suffix="today's money / yr"><NumIn value={p.spend} onChange={(v) => up("spend", v)} prefix={cur} step={1000} /></Field>
+            <label style={{ display: "block", marginBottom: 18 }}>
+              <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em",
+                textTransform: "uppercase", color: C.inkDim, marginBottom: 7, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>{autoIncome ? "Income your stack supports" : "Retirement income wanted"}</span>
+                <button onClick={toggleAutoIncome} style={{
+                  background: autoIncome ? "rgba(127,176,105,.18)" : "rgba(255,255,255,.06)",
+                  border: `1px solid ${autoIncome ? C.green : C.line}`,
+                  borderRadius: 4, padding: "1px 8px", fontSize: 10,
+                  fontFamily: "'IBM Plex Mono',monospace", letterSpacing: ".08em",
+                  color: autoIncome ? C.green : C.inkDim, cursor: "pointer", lineHeight: 1.8, whiteSpace: "nowrap"
+                }}>{autoIncome ? "● auto" : "○ auto"}</button>
+              </div>
+              <NumIn value={p.spend} onChange={(v) => up("spend", v)} prefix={cur} step={1000} disabled={autoIncome} />
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: autoIncome ? C.green : C.inkFaint, lineHeight: 1.5, marginTop: 6 }}>
+                {autoIncome
+                  ? `Max inflation-adjusted income this stack sustains to age ${normalize(p).endAge}.`
+                  : "today's money / yr — or switch on auto to solve income from your retire age."}
+              </div>
+            </label>
 
             <div style={{ height: 1, background: C.line, margin: "6px 0 18px" }} />
 
@@ -1402,7 +1460,7 @@ export default function App() {
             <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 16, marginTop: 4 }}>
               <button className="seg" style={{ width: "100%", textAlign: "left", padding: "8px 12px",
                 border: `1px solid ${brd.show ? C.green : C.line}`, color: brd.show ? C.green : C.inkDim }}
-                onClick={() => upBrd("show", !brd.show)}>
+                onClick={toggleBridge}>
                 {brd.show ? "− Hide" : "+ Bridge Stack"} · two-phase retirement
               </button>
               {brd.show && (
