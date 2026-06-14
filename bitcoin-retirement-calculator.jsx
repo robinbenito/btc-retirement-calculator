@@ -451,6 +451,18 @@ function calcForeverCurve(p, model, endAge) {
   }
   return rows;
 }
+// For a given income, the earliest retire age at which DCA accumulation fully funds the
+// forever stack (acc BTC ≥ required BTC). Returns null if not reachable by ageMax. (#11)
+function earliestForeverAge(p, model, income, endAge) {
+  const endAgeEff = endAge ?? 120;
+  const ageMax = Math.min(endAgeEff - 1, 85);
+  for (let ra = p.age + 1; ra <= ageMax; ra++) {
+    const accBtc = accumulateBtc(p.btc, p.monthly, ra - p.age, model);
+    const reqBtc = solveForeverBtc(income, ra, p.age, p.infl, model, endAgeEff);
+    if (accBtc >= reqBtc) return ra;
+  }
+  return null;
+}
 function solveForeverBtc(income, bridgeEndAge, age0, infl, model, endAge) {
   const survives = (startBtc) => {
     let stack = startBtc;
@@ -1157,6 +1169,23 @@ export default function App() {
   const fvrA = useMemo(() => calcForever(normalize(scen.A), sharedModel, rA.retStack), [scen.A, sharedModel, rA]);
   const fvrB = useMemo(() => compare && rB ? calcForever(normalize(scen.B), modelOf(scen.B), rB.retStack) : null, [scen.B, compare, rB]);
   const fvrCurve = useMemo(() => calcForeverCurve(normalize(scen.A), sharedModel, scen.A.endAge), [scen.A, sharedModel]);
+  // #11: a few income levels around the current target → earliest age each becomes a forever stack.
+  const fvrTable = useMemo(() => {
+    const nA = normalize(scen.A);
+    const base = nA.spend;
+    if (!(base > 0)) return [];
+    const cur1k = Math.round(base / 1000) * 1000;
+    const seen = new Set(), incomes = [];
+    for (const f of [0.5, 0.75, 1, 1.5, 2]) {
+      const inc = Math.max(1000, Math.round(base * f / 1000) * 1000);
+      if (!seen.has(inc)) { seen.add(inc); incomes.push(inc); }
+    }
+    return incomes.map(inc => ({
+      income: inc,
+      isCurrent: inc === cur1k,
+      age: earliestForeverAge(nA, sharedModel, inc, nA.endAge),
+    }));
+  }, [scen.A, sharedModel]);
 
   /* ── Bridge stack (always computed; inherits age/btc/monthly/infl from scen.A) ── */
   const brdInput = useMemo(() => ({
@@ -1829,8 +1858,14 @@ export default function App() {
 
             {/* ③ FOREVER STACK */}
             <div className="card fade" style={{ padding: 22, borderLeft: `3px solid ${C.green}` }}>
-              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.green, marginBottom: 14 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.green, marginBottom: 6 }}>
                 Forever Stack
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkFaint, marginBottom: 16 }}>
+                Income: <span style={{ color: autoIncome ? C.green : C.orange }}>{cur}{Math.round(normalize(scen.A).spend).toLocaleString()}/yr</span>
+                {autoIncome
+                  ? <span style={{ color: C.green }}> · auto (max your stack sustains)</span>
+                  : <span> · today's money</span>}
               </div>
               <>
                   <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 18 }}>
@@ -1880,6 +1915,33 @@ export default function App() {
                   ) : fvrB && !fvrB.possible ? (
                     <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.red }}>Scenario B: real return ≤ inflation — perpetual income not achievable.</div>
                   ) : null}
+
+                  {!compare && fvrTable.length > 0 && (
+                    <div style={{ marginTop: 20 }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim, marginBottom: 4 }}>
+                        Retire age by income
+                      </div>
+                      <div style={{ display: "flex", padding: "8px 2px", borderBottom: `1px solid ${C.line}` }}>
+                        <div style={{ flex: 1, fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: C.inkDim }}>Annual income</div>
+                        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: C.inkDim }}>Retire by</div>
+                      </div>
+                      {fvrTable.map(row => (
+                        <div key={row.income} style={{ display: "flex", alignItems: "center", padding: "9px 2px", borderBottom: `1px solid ${C.line}`,
+                          background: row.isCurrent ? "rgba(127,176,105,.08)" : "transparent" }}>
+                          <div style={{ flex: 1, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: row.isCurrent ? C.green : C.ink }}>
+                            {cur}{row.income.toLocaleString()}/yr{row.isCurrent ? " · current" : ""}
+                          </div>
+                          <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, fontWeight: 600,
+                            color: row.age == null ? C.inkFaint : row.isCurrent ? C.green : C.ink }}>
+                            {row.age == null ? "not by 85" : `age ${row.age}`}
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginTop: 8, lineHeight: 1.5 }}>
+                        Earliest age your DCA fully funds a forever stack at each income, surviving to age {normalize(scen.A).endAge}.
+                      </div>
+                    </div>
+                  )}
               </>
             </div>
 
@@ -1893,7 +1955,15 @@ export default function App() {
           const { isEuro, headSrc, catSrc, basketLoading, headLive } = inflData;
           const haveBasket = piResult.haveBasket;
           const winYears = []; for (let y = piResult.yMin; y <= piResult.yMax; y++) winYears.push(y);
-          const sourceLabel = [headSrc, isEuro && catSrc].filter(Boolean).join(" · ");
+          // #8 "verify don't trust" — link each source to the exact live feed we read.
+          const geo = EURO_GEOS[euroGeo]?.geo;
+          const srcUrl = (name) => {
+            if (name === "World Bank") return `https://api.worldbank.org/v2/country/${inflData.wb}/indicator/FP.CPI.TOTL?format=json&date=2010:2025`;
+            if (name === "Eurostat") return `https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_aind?format=JSON&unit=INX_A_AVG&geo=${geo}&coicop=CP00`;
+            if (name && name.startsWith("Destatis")) return "https://www.destatis.de/EN/Themes/Economy/Prices/Consumer-Price-Index/_node.html";
+            return null;
+          };
+          const sources = [headSrc, isEuro && catSrc].filter(Boolean);
           const catChg = Object.fromEntries(piResult.contrib.map(c => [c.code, c.chg]));
           const setWindow = (span) => { setInflEnd(piResult.yMax); setInflStart(Math.max(piResult.yMin, piResult.yMax - span)); };
           return (
@@ -1906,7 +1976,19 @@ export default function App() {
                   {COUNTRIES[country].flag} {COUNTRIES[country].label} · live CPI{!headLive ? " (offline)" : ""}
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>
-                  Source: {sourceLabel || "—"} · index back to {piResult.yMin}
+                  Source: {sources.length ? sources.map((s, i) => {
+                    const u = srcUrl(s);
+                    return (
+                      <React.Fragment key={s + i}>
+                        {i > 0 && " · "}
+                        {u ? (
+                          <a href={u} target="_blank" rel="noopener noreferrer"
+                            title="Open the live data feed — verify, don't trust"
+                            style={{ color: C.orange, textDecoration: "none", borderBottom: `1px dotted ${C.orange}` }}>{s} ↗</a>
+                        ) : s}
+                      </React.Fragment>
+                    );
+                  }) : "—"} · index back to {piResult.yMin}
                 </div>
                 {isEuro && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
@@ -2211,6 +2293,20 @@ export default function App() {
 
         <footer style={{ marginTop: 30, paddingTop: 18, borderTop: `1px solid ${C.line}`,
           color: C.inkFaint, fontSize: 12, lineHeight: 1.6, maxWidth: 760 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 16 }}>
+            <a href="https://github.com/robinbenito/btc-retirement-calculator" target="_blank" rel="noopener noreferrer">
+              <img alt="GitHub" height="24"
+                src="https://img.shields.io/github/stars/robinbenito/btc-retirement-calculator?style=social" />
+            </a>
+            <a href="https://buymeabitcoffee.vercel.app/btc/bc1p6nrgd38nmx09lm2j8ql8wg58nlfsmsh2zxyapss7ljxxvj636c0swhuqdm?identifier=Buy+Me+a+BitCoffee&lightning=civicdrone297%40walletofsatoshi.com" target="_blank" rel="noopener noreferrer">
+              <img alt="Buy Me a BitCoffee" height="24"
+                src="https://img.shields.io/badge/Buy%20Me%20a%20BitCoffee-f7931a?logo=bitcoin&logoColor=black&color=f7931a&style=social&label=Useful%3F" />
+            </a>
+            <a href="https://www.buymeacoffee.com/rgaston" target="_blank" rel="noopener noreferrer">
+              <img alt="Buy Me a Coffee" height="24"
+                src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black&style=social" />
+            </a>
+          </div>
           <strong style={{ color: C.inkDim }}>Not financial advice.</strong> The power-law option extrapolates
           BTC's historical price-vs-time trend (price ∝ daysⁿ) forward from today's spot — a thesis, not a fact.
           The Monte Carlo wraps that trend in random, mean-reverting volatility that decays as you set it; it's a
