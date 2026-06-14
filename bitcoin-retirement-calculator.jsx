@@ -33,14 +33,31 @@ const fmtSats = (n) => `${Math.round(n).toLocaleString()} sats`;
 const SATS = 1e8;
 
 /* ── Country / currency + asset inflation presets ───────────────── */
+/* wb = World Bank ISO3 used for the live CPI feed (EMU = euro-area aggregate). */
 const COUNTRIES = {
-  US: { flag:"🇺🇸", label:"USA",         cur:"$",   cgCode:"usd", assetInfl:{ car:0.055, realestate:0.06,  boat:0.05, travel:0.04,  general:0.03  } },
-  EU: { flag:"🇪🇺", label:"Eurozone",    cur:"€",   cgCode:"eur", assetInfl:{ car:0.045, realestate:0.055, boat:0.045,travel:0.035, general:0.025 } },
-  GB: { flag:"🇬🇧", label:"UK",          cur:"£",   cgCode:"gbp", assetInfl:{ car:0.05,  realestate:0.065, boat:0.05, travel:0.045, general:0.035 } },
-  CA: { flag:"🇨🇦", label:"Canada",      cur:"CA$", cgCode:"cad", assetInfl:{ car:0.055, realestate:0.07,  boat:0.05, travel:0.04,  general:0.035 } },
-  AU: { flag:"🇦🇺", label:"Australia",   cur:"A$",  cgCode:"aud", assetInfl:{ car:0.05,  realestate:0.07,  boat:0.05, travel:0.04,  general:0.035 } },
-  CH: { flag:"🇨🇭", label:"Switzerland", cur:"CHF", cgCode:"chf", assetInfl:{ car:0.035, realestate:0.045, boat:0.035,travel:0.03,  general:0.015 } },
-  JP: { flag:"🇯🇵", label:"Japan",       cur:"¥",   cgCode:"jpy", assetInfl:{ car:0.02,  realestate:0.03,  boat:0.02, travel:0.02,  general:0.01  } },
+  US: { flag:"🇺🇸", label:"USA",         cur:"$",   cgCode:"usd", wb:"USA", assetInfl:{ car:0.055, realestate:0.06,  boat:0.05, travel:0.04,  general:0.03  } },
+  EU: { flag:"🇪🇺", label:"Eurozone",    cur:"€",   cgCode:"eur", wb:"EMU", euro:true, assetInfl:{ car:0.045, realestate:0.055, boat:0.045,travel:0.035, general:0.025 } },
+  GB: { flag:"🇬🇧", label:"UK",          cur:"£",   cgCode:"gbp", wb:"GBR", assetInfl:{ car:0.05,  realestate:0.065, boat:0.05, travel:0.045, general:0.035 } },
+  CA: { flag:"🇨🇦", label:"Canada",      cur:"CA$", cgCode:"cad", wb:"CAN", assetInfl:{ car:0.055, realestate:0.07,  boat:0.05, travel:0.04,  general:0.035 } },
+  AU: { flag:"🇦🇺", label:"Australia",   cur:"A$",  cgCode:"aud", wb:"AUS", assetInfl:{ car:0.05,  realestate:0.07,  boat:0.05, travel:0.04,  general:0.035 } },
+  CH: { flag:"🇨🇭", label:"Switzerland", cur:"CHF", cgCode:"chf", wb:"CHE", assetInfl:{ car:0.035, realestate:0.045, boat:0.035,travel:0.03,  general:0.015 } },
+  JP: { flag:"🇯🇵", label:"Japan",       cur:"¥",   cgCode:"jpy", wb:"JPN", assetInfl:{ car:0.02,  realestate:0.03,  boat:0.02, travel:0.02,  general:0.01  } },
+};
+
+/* Euro-area members selectable in the inflation workspace. wb = World Bank ISO3 (per-country
+   headline CPI); geo = Eurostat code (per-COICOP basket). */
+const EURO_GEOS = {
+  DE: { label:"Germany",     wb:"DEU", geo:"DE" },
+  FR: { label:"France",      wb:"FRA", geo:"FR" },
+  IT: { label:"Italy",       wb:"ITA", geo:"IT" },
+  ES: { label:"Spain",       wb:"ESP", geo:"ES" },
+  NL: { label:"Netherlands", wb:"NLD", geo:"NL" },
+  AT: { label:"Austria",     wb:"AUT", geo:"AT" },
+  BE: { label:"Belgium",     wb:"BEL", geo:"BE" },
+  PT: { label:"Portugal",    wb:"PRT", geo:"PT" },
+  IE: { label:"Ireland",     wb:"IRL", geo:"IE" },
+  FI: { label:"Finland",     wb:"FIN", geo:"FI" },
+  GR: { label:"Greece",      wb:"GRC", geo:"EL" },
 };
 
 /* Savings goal presets — coicop maps to DE basket category for personalised inflation */
@@ -76,6 +93,80 @@ const PI_PRESETS = {
   car:      { "01":12,"02":3,"03":4,"04":24,"05":6,"06":5,"07":22,"08":2,"09":9,"10":1,"11":4,"12":8 },
   even:     Object.fromEntries(PI_CATS.map(c => [c.code, +(100/12).toFixed(2)])),
 };
+/* Embedded fallback if the live feed is unreachable: DE COICOP 2020=100 indices extended
+   back to 2010 (rebased from Destatis 2015=100 series). Headline & per-category. */
+const PI_FALLBACK_YEARS = [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+const PI_FALLBACK_HEADLINE = [88.6, 90.5, 92.3, 93.7, 94.6, 95.0, 95.4, 96.8, 98.5, 99.9, 100, 103.1, 110.2, 116.7, 119.3, 121.9];
+
+/* ── Live inflation feed ──────────────────────────────────────────
+   Headline CPI for every selectable country/region comes from the World Bank
+   (indicator FP.CPI.TOTL, annual, back to 2010). Per-COICOP basket detail for the
+   euro area comes from Eurostat (prc_hicp_aind). Both degrade to embedded data. */
+const annualizedRate = (idx, y0, y1) =>
+  (idx[y0] > 0 && idx[y1] > 0 && y1 > y0) ? Math.pow(idx[y1] / idx[y0], 1 / (y1 - y0)) - 1 : 0;
+
+async function fetchWorldBankCPI(iso3List) {
+  const codes = iso3List.join(";");
+  const url = `https://api.worldbank.org/v2/country/${codes}/indicator/FP.CPI.TOTL?format=json&per_page=5000&date=2010:2025`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("world bank " + r.status);
+  const j = await r.json();
+  const rows = Array.isArray(j) && Array.isArray(j[1]) ? j[1] : [];
+  const out = {};
+  for (const row of rows) {
+    if (row.value == null) continue;
+    // aggregates (euro area) report the code in country.id rather than countryiso3code
+    const key = row.countryiso3code || row.country?.id;
+    if (!key) continue;
+    (out[key] ||= {})[+row.date] = row.value;
+  }
+  return out;   // { ISO3: { year: index } }
+}
+
+/* Minimal JSON-stat 2.0 reader: returns value at the given dimension-category map. */
+function jsonStatLookup(ds, sel) {
+  const dimIds = ds.id || ds.dimension?.id;
+  const sizes = ds.size || (dimIds || []).map(d => ds.dimension[d].category.index.length ?
+    Object.keys(ds.dimension[d].category.index).length : 1);
+  let offset = 0;
+  for (let i = 0; i < dimIds.length; i++) {
+    const dim = dimIds[i];
+    const cats = ds.dimension[dim].category.index;
+    const pos = Array.isArray(cats) ? cats.indexOf(sel[dim]) : cats[sel[dim]];
+    if (pos == null || pos < 0) return null;
+    let stride = 1;
+    for (let k = i + 1; k < sizes.length; k++) stride *= sizes[k];
+    offset += pos * stride;
+  }
+  const v = ds.value[offset];
+  return v == null ? null : v;
+}
+
+async function fetchEurostatBasket(geo) {
+  const coicops = ["CP00", ...PI_CATS.map(c => "CP" + c.code)];
+  const params = new URLSearchParams();
+  params.set("format", "JSON");
+  params.set("unit", "INX_A_AVG");
+  params.set("geo", geo);
+  coicops.forEach(c => params.append("coicop", c));
+  const url = `https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_aind?${params}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("eurostat " + r.status);
+  const ds = await r.json();
+  const timeCats = ds.dimension?.time?.category?.index;
+  const years = (Array.isArray(timeCats) ? timeCats : Object.keys(timeCats || {}))
+    .map(Number).filter(y => y >= 2010).sort((a, b) => a - b);
+  if (!years.length) throw new Error("eurostat: no years");
+  const at = (coicop, year) => jsonStatLookup(ds, { geo, coicop, time: String(year), unit: "INX_A_AVG" });
+  const headline = {}, cats = {};
+  years.forEach(y => { const v = at("CP00", y); if (v != null) headline[y] = v; });
+  PI_CATS.forEach(c => {
+    const code = c.code, series = {};
+    years.forEach(y => { const v = at("CP" + code, y); if (v != null) series[y] = v; });
+    cats[code] = series;
+  });
+  return { years: years.filter(y => headline[y] != null), headline, cats };
+}
 
 /* Smooth animated number for the personal inflation display */
 function useAnimatedNumber(target, ms = 600) {
@@ -705,8 +796,12 @@ export default function App() {
 
   /* ── Personal inflation state ── */
   const [inflWeights, setInflWeights] = useState(PI_PRESETS.official);
-  const [inflEndYear, setInflEndYear] = useState(2025);
-  const [yourInflRate, setYourInflRate] = useState(null);
+  const [inflStart, setInflStart] = useState(2020);     // averaging-window start year (#6)
+  const [inflEnd, setInflEnd] = useState(2025);         // averaging-window end year
+  const [inflOverride, setInflOverride] = useState(false);  // user has hand-tuned projection infl (else auto from My Inflation, #5)
+  const [euroGeo, setEuroGeo] = useState("DE");         // exact euro-area country for the basket (#3)
+  const [cpiLive, setCpiLive] = useState({ status: "loading" });    // World Bank headline, all countries
+  const [euroBasket, setEuroBasket] = useState({ status: "idle" }); // Eurostat per-COICOP, per geo
 
   /* ── Bridge stack state (bridge-specific inputs only; age/btc/monthly/infl from scen.A) ── */
   const [brd, setBrd] = useState({ show: false, foreverIncome: 48000 });
@@ -826,6 +921,36 @@ export default function App() {
     setScen(s => ({ A: { ...s.A, spot: Math.round(local), fxRate: fx }, B: { ...s.B, spot: Math.round(local), fxRate: fx } }));
   };
 
+  /* ── Live inflation: World Bank headline CPI for every country + euro member (once) ── */
+  useEffect(() => { (async () => {
+    const iso3 = [...new Set([
+      ...Object.values(COUNTRIES).map(c => c.wb),
+      ...Object.values(EURO_GEOS).map(g => g.wb),
+    ])];
+    try {
+      const byIso = await fetchWorldBankCPI(iso3);
+      if (Object.keys(byIso).length) { setCpiLive({ status: "ok", byIso, src: "World Bank" }); return; }
+      throw new Error("empty");
+    } catch (e) { setCpiLive({ status: "fail" }); }
+  })(); }, []);
+
+  /* ── Live inflation: Eurostat per-COICOP basket for the selected euro country ── */
+  useEffect(() => {
+    if (country !== "EU") return;
+    const geo = EURO_GEOS[euroGeo]?.geo;
+    if (!geo) return;
+    if (euroBasket.status === "ok" && euroBasket.geo === euroGeo) return;
+    let cancelled = false;
+    setEuroBasket({ status: "loading", geo: euroGeo });
+    (async () => {
+      try {
+        const data = await fetchEurostatBasket(geo);
+        if (!cancelled) setEuroBasket({ status: "ok", geo: euroGeo, ...data });
+      } catch (e) { if (!cancelled) setEuroBasket({ status: "fail", geo: euroGeo }); }
+    })();
+    return () => { cancelled = true; };
+  }, [country, euroGeo]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   const countryRef = useRef(null);
   useEffect(() => {
     if (!showCountry) return;
@@ -838,27 +963,109 @@ export default function App() {
   const rB = useMemo(() => (compare ? simulate(normalize(scen.B, shock)) : null), [scen.B, compare, shock]);
   const merged = useMemo(() => merge(rA, rB), [rA, rB]);
 
-  /* ── Personal inflation derived values ── */
+  /* ── Resolve the inflation data source for the active country (live → fallback) ── */
+  const inflData = useMemo(() => {
+    const isEuro = !!COUNTRIES[country].euro;
+    const wb = isEuro ? EURO_GEOS[euroGeo].wb : COUNTRIES[country].wb;
+    // headline CPI index series
+    let headline, headSrc, headLive = false;
+    const liveSeries = cpiLive.status === "ok" ? cpiLive.byIso[wb] : null;
+    if (liveSeries && Object.keys(liveSeries).length >= 2) {
+      headline = liveSeries; headSrc = "World Bank"; headLive = true;
+    } else if (isEuro && euroGeo === "DE") {
+      headline = Object.fromEntries(PI_FALLBACK_YEARS.map((y, i) => [y, PI_FALLBACK_HEADLINE[i]]));
+      headSrc = "Destatis (offline)";
+    } else {
+      const gen = COUNTRIES[country].assetInfl.general;
+      headline = Object.fromEntries(PI_FALLBACK_YEARS.map(y => [y, +(100 * Math.pow(1 + gen, y - 2010)).toFixed(2)]));
+      headSrc = "estimate (offline)";
+    }
+    // per-COICOP basket series (euro area only)
+    let cats = null, catYears = [], catSrc = null, catLive = false;
+    if (isEuro) {
+      if (euroBasket.status === "ok" && euroBasket.geo === euroGeo && euroBasket.cats) {
+        cats = euroBasket.cats; catYears = euroBasket.years; catSrc = "Eurostat"; catLive = true;
+      } else {
+        cats = Object.fromEntries(PI_CATS.map(c => [c.code, Object.fromEntries(PI_YEARS.map((y, i) => [y, c.s[i]]))]));
+        catYears = PI_YEARS.slice(); catSrc = euroGeo === "DE" ? "Destatis (offline)" : "Destatis DE proxy";
+      }
+    }
+    const headYears = Object.keys(headline).map(Number).sort((a, b) => a - b);
+    return { isEuro, wb, headline, headYears, headSrc, headLive, cats, catYears, catSrc, catLive,
+      basketLoading: isEuro && euroBasket.status === "loading" };
+  }, [country, euroGeo, cpiLive, euroBasket]);
+
+  /* ── Personal inflation derived values (window = [inflStart, inflEnd]) ── */
   const piResult = useMemo(() => {
+    const { headline, headYears, cats, catYears } = inflData;
+    const yMin = headYears[0], yMax = headYears[headYears.length - 1];
+    const end = Math.min(Math.max(inflEnd, yMin + 1), yMax);
+    const start = Math.min(Math.max(inflStart, yMin), end - 1);
     const total = Object.values(inflWeights).reduce((a, b) => a + (+b || 0), 0);
-    const yi = PI_YEARS.indexOf(inflEndYear);
-    const series = PI_YEARS.map((yr, i) => {
-      let acc = 0; PI_CATS.forEach(c => { acc += (inflWeights[c.code] || 0) * c.s[i]; });
-      return { year: yr, you: total > 0 ? acc / total : 100, official: PI_HEADLINE[i] };
+
+    // weighted basket index per year (raw, shared base) where every weighted category has data
+    const catSet = new Set(catYears);
+    const basketIdx = {};
+    if (cats) headYears.forEach(y => {
+      if (!catSet.has(y)) return;
+      let acc = 0, wsum = 0, ok = true;
+      PI_CATS.forEach(c => {
+        const v = cats[c.code]?.[y], w = inflWeights[c.code] || 0;
+        if (v == null) { if (w > 0) ok = false; return; }
+        acc += w * v; wsum += w;
+      });
+      if (ok && wsum > 0) basketIdx[y] = acc / wsum;
     });
-    const youIdx = series[yi].you;
-    const span = inflEndYear - 2020;
-    const youAnnual = span > 0 ? (Math.pow(youIdx / 100, 1 / span) - 1) * 100 : 0;
-    const offAnnual = span > 0 ? (Math.pow(PI_HEADLINE[yi] / 100, 1 / span) - 1) * 100 : 0;
-    const categoryRates = Object.fromEntries(PI_CATS.map(c => [c.code, span > 0 ? (Math.pow(c.s[yi] / 100, 1 / span) - 1) * 100 : 0]));
+    const basketYears = Object.keys(basketIdx).map(Number).sort((a, b) => a - b);
+    const haveBasket = basketYears.length >= 2 && basketIdx[end] != null;
+    const bStart = haveBasket ? Math.max(start, basketYears[0]) : start;
+
+    const base = headline[start] || headline[headYears[0]];
+    const series = headYears.filter(y => y >= Math.min(start, bStart)).map(y => ({
+      year: y,
+      official: headline[y] != null && base ? (headline[y] / base) * 100 : null,
+      you: haveBasket && basketIdx[y] != null && basketIdx[bStart] ? (basketIdx[y] / basketIdx[bStart]) * 100 : null,
+    }));
+
+    const offAnnual = annualizedRate(headline, start, end) * 100;
+    const youAnnual = haveBasket ? annualizedRate(basketIdx, bStart, end) * 100 : offAnnual;
+    const youIdx = haveBasket && basketIdx[bStart] ? (basketIdx[end] / basketIdx[bStart]) * 100
+      : (base ? (headline[end] / base) * 100 : 100);
+    const offIdx = base ? (headline[end] / base) * 100 : 100;
+
+    const catStart = (s) => { const ys = Object.keys(s || {}).map(Number); return ys.length ? Math.max(bStart, Math.min(...ys.filter(y => y <= end))) : bStart; };
+    const categoryRates = Object.fromEntries(PI_CATS.map(c => {
+      const s = cats?.[c.code]; const cs = s ? catStart(s) : bStart;
+      return [c.code, s && s[cs] && s[end] != null ? annualizedRate(s, cs, end) * 100 : youAnnual];
+    }));
     const contrib = PI_CATS.map(c => {
       const w = total > 0 ? (inflWeights[c.code] || 0) / total : 0;
-      const chg = c.s[yi] - 100;
+      const s = cats?.[c.code]; const cs = s ? catStart(s) : bStart;
+      const chg = (s && s[cs] && s[end] != null) ? (s[end] / s[cs] - 1) * 100 : 0;
       return { ...c, share: w, weight: inflWeights[c.code] || 0, chg, contribution: w * chg };
     }).sort((a, b) => b.contribution - a.contribution);
     const maxAbs = Math.max(0.01, ...contrib.map(c => Math.abs(c.contribution)));
-    return { total, series, youIdx, youAnnual, offAnnual, categoryRates, yi, contrib, maxAbs };
-  }, [inflWeights, inflEndYear]);
+    return { total, series, youIdx, offIdx, youAnnual, offAnnual, categoryRates, contrib, maxAbs,
+      start, end, bStart, haveBasket, yMin, yMax };
+  }, [inflWeights, inflStart, inflEnd, inflData]);
+
+  // keep the averaging window inside the available data range as the source/country changes
+  useEffect(() => {
+    const { yMin, yMax } = piResult;
+    if (yMax == null) return;
+    if (inflEnd > yMax || inflEnd <= yMin) setInflEnd(yMax);
+    if (inflStart < yMin || inflStart >= (inflEnd > yMax ? yMax : inflEnd)) setInflStart(Math.max(yMin, (inflEnd > yMax ? yMax : inflEnd) - 5));
+  }, [piResult.yMin, piResult.yMax]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── #5: projection inflation auto-tracks the My Inflation rate unless the user overrides ── */
+  const autoInfl = useMemo(() => Math.round((piResult.youAnnual / 100) * 1000) / 1000, [piResult.youAnnual]);
+  useEffect(() => {
+    if (inflOverride) return;
+    setScen(s => (s.A.infl === autoInfl && s.B.infl === autoInfl) ? s
+      : { A: { ...s.A, infl: autoInfl }, B: { ...s.B, infl: autoInfl } });
+  }, [autoInfl, inflOverride]);
+  const setInfl = (v) => { setInflOverride(true); up("infl", v); };
+  const resetInflAuto = () => { setInflOverride(false); setScen(s => ({ A: { ...s.A, infl: autoInfl }, B: { ...s.B, infl: autoInfl } })); };
 
   /* ── Animated personal inflation for display ── */
   const animInfl = useAnimatedNumber(piResult.youAnnual);
@@ -1139,16 +1346,17 @@ export default function App() {
                     <Slider value={p.cagr} onChange={(v) => up("cagr", v)} min={0} max={0.4} step={0.01} fmt={(v) => `${(v * 100).toFixed(0)}% / yr`} /></Field>
                 )}
                 <Field label="Current BTC price" suffix={cur}><NumIn value={p.spot} onChange={(v) => up("spot", v)} prefix={cur} step={1000} /></Field>
-                <Field label="Inflation">
-                  {yourInflRate !== null && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7,
-                      fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.green }}>
-                      ↳ Your personal rate: {(yourInflRate * 100).toFixed(1)}%/yr
-                      <button className="seg" style={{ padding: "3px 9px", fontSize: 11 }}
-                        onClick={() => up("infl", yourInflRate)}>Apply</button>
-                    </div>
-                  )}
-                  <Slider value={p.infl} onChange={(v) => up("infl", v)} min={0} max={0.08} step={0.005} fmt={(v) => `${(v * 100).toFixed(1)}% / yr`} />
+                <Field label="Inflation" suffix={inflOverride ? "manual override" : "auto · My Inflation"}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7,
+                    fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: inflOverride ? C.inkFaint : C.green }}>
+                    {inflOverride ? (
+                      <>↳ My Inflation rate: {(autoInfl * 100).toFixed(1)}%/yr
+                        <button className="seg" style={{ padding: "3px 9px", fontSize: 11 }} onClick={resetInflAuto}>↺ Auto</button></>
+                    ) : (
+                      <>↳ Tracking your {COUNTRIES[country].label} basket · {(autoInfl * 100).toFixed(1)}%/yr</>
+                    )}
+                  </div>
+                  <Slider value={p.infl} onChange={setInfl} min={0} max={0.12} step={0.001} fmt={(v) => `${(v * 100).toFixed(1)}% / yr`} />
                 </Field>
                 <Field label="Plan until age"><Slider value={p.endAge} onChange={(v) => up("endAge", v)} min={70} max={120} step={1} fmt={(v) => `${v} yrs old`} /></Field>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, lineHeight: 1.5, marginBottom: 16 }}>
@@ -1581,149 +1789,191 @@ export default function App() {
         {/* ══════════════════════════════════════════
             TAB: MY INFLATION
         ══════════════════════════════════════════ */}
-        {tab === "inflation" && (
+        {tab === "inflation" && (() => {
+          const { isEuro, headSrc, catSrc, basketLoading, headLive } = inflData;
+          const haveBasket = piResult.haveBasket;
+          const winYears = []; for (let y = piResult.yMin; y <= piResult.yMax; y++) winYears.push(y);
+          const sourceLabel = [headSrc, isEuro && catSrc].filter(Boolean).join(" · ");
+          const catChg = Object.fromEntries(piResult.contrib.map(c => [c.code, c.chg]));
+          const setWindow = (span) => { setInflEnd(piResult.yMax); setInflStart(Math.max(piResult.yMin, piResult.yMax - span)); };
+          return (
           <div className="fade">
-            {country !== "EU" ? (
-              <div className="card" style={{ padding: 28, maxWidth: 520 }}>
-                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: C.inkDim, lineHeight: 1.6, marginBottom: 18 }}>
-                  Detailed CPI basket data is currently available for <strong style={{ color: C.ink }}>Germany / Eurozone</strong> only.
+            {/* ── Header: country, source, averaging window (#6) ── */}
+            <div className="card" style={{ padding: "16px 20px", marginBottom: 22, display: "flex", flexWrap: "wrap",
+              alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: C.inkDim, marginBottom: 6 }}>
+                  {COUNTRIES[country].flag} {COUNTRIES[country].label} · live CPI{!headLive ? " (offline)" : ""}
                 </div>
-                <button className="seg on" onClick={() => setCountry("EU")} style={{ padding: "9px 16px" }}>Switch to Eurozone 🇪🇺</button>
-              </div>
-            ) : (
-              <>
-                <div className="grid-wrap" style={{ display: "grid", gap: 22, gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)" }}>
-                  {/* Left: readout */}
-                  <section className="card" style={{ padding: 22 }}>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: C.inkDim, marginBottom: 14 }}>
-                      Destatis · Verbraucherpreisindex · 2020 = 100
-                    </div>
-                    <div style={{ display: "flex", gap: 4, marginBottom: 18 }}>
-                      {[2021,2022,2023,2024,2025].map(y => (
-                        <button key={y} className={`seg ${inflEndYear === y ? "on" : ""}`} onClick={() => setInflEndYear(y)} style={{ fontSize: 12 }}>{y}</button>
-                      ))}
-                    </div>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, fontSize: "clamp(48px,9vw,78px)", color: C.orange, lineHeight: 0.9, marginBottom: 6 }}>
-                      {animInfl >= 0 ? "+" : ""}{animInfl.toFixed(1)}%
-                    </div>
-                    <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, color: C.inkDim, marginBottom: 22 }}>per year · your basket · 2020–{inflEndYear}</div>
-                    <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 22 }}>
-                      <Stat label="Official headline" big={`${piResult.offAnnual.toFixed(1)}%/yr`} color={C.inkDim} />
-                      <Stat label="Gap vs official" big={`${piResult.youAnnual - piResult.offAnnual >= 0 ? "+" : ""}${(piResult.youAnnual - piResult.offAnnual).toFixed(1)}%`}
-                        color={piResult.youAnnual > piResult.offAnnual ? C.red : C.green} />
-                    </div>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim, marginBottom: 20, lineHeight: 1.55 }}>
-                      What cost <span style={{ color: C.ink }}>€100</span> in 2020 now costs you{" "}
-                      <span style={{ color: C.orange, fontWeight: 600 }}>€{piResult.youIdx.toFixed(2)}</span>
-                      {" "}— official basket says <span style={{ color: C.inkDim }}>€{PI_HEADLINE[piResult.yi].toFixed(2)}</span>.
-                    </div>
-                    <ResponsiveContainer width="100%" height={190}>
-                      <LineChart data={piResult.series} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
-                        <CartesianGrid stroke={C.line} vertical={false} />
-                        <XAxis dataKey="year" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                        <YAxis domain={["dataMin - 2", "dataMax + 2"]} stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                        <Tooltip content={<TTg fmt={v => v.toFixed(1)} />} />
-                        <Line type="monotone" dataKey="official" stroke={C.inkDim} strokeWidth={1.5} dot={false} strokeDasharray="4 3" name="Official" />
-                        <Line type="monotone" dataKey="you" stroke={C.orange} strokeWidth={2.5} dot={false} name="You" />
-                        <ReferenceDot x={inflEndYear} y={piResult.youIdx} r={4} fill={C.orange} stroke={C.bg} strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                    <div style={{ marginTop: 16, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
-                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.inkDim, marginBottom: 8 }}>
-                        Contribution to your inflation · {inflEndYear}
-                      </div>
-                      {piResult.contrib.map(c => {
-                        const pos = c.contribution >= 0;
-                        const wpx = (Math.abs(c.contribution) / piResult.maxAbs) * 44;
-                        return (
-                          <div key={c.code} style={{ display: "grid", gridTemplateColumns: "22px 1fr 80px 52px", gap: 8, alignItems: "center", padding: "5px 0", borderTop: `1px solid ${C.line}` }}>
-                            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>{c.code}</span>
-                            <span style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12 }}>{c.en}</span>
-                            <div style={{ position: "relative", height: 14 }}>
-                              <div style={{ position: "absolute", left: pos ? "50%" : `${50 - wpx}%`, width: `${wpx}%`, top: 2, height: 10, borderRadius: 2, background: pos ? C.red : C.green, opacity: c.weight === 0 ? 0.2 : 0.8 }} />
-                              <div style={{ position: "absolute", left: "50%", top: -1, bottom: -1, width: 1, background: C.line }} />
-                            </div>
-                            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, textAlign: "right", color: pos ? C.red : C.green }}>
-                              {pos ? "+" : "−"}{Math.abs(c.contribution).toFixed(1)}%
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {/* Right: controls */}
-                  <section className="card" style={{ padding: 22, alignSelf: "start" }}>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.inkDim, marginBottom: 14 }}>
-                      Set your spending mix
-                    </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-                      {[["official","Official basket"],["foodrent","Food & rent heavy"],["car","Car commuter"],["even","Even split"]].map(([k, lab]) => (
-                        <button key={k} className="seg" onClick={() => setInflWeights(PI_PRESETS[k])} style={{ fontSize: 11 }}>{lab}</button>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10,
-                      fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim }}>
-                      <span>Total: <span style={{ color: Math.abs(piResult.total - 100) < 0.5 ? C.ink : C.orange, fontWeight: 600 }}>{piResult.total.toFixed(1)}%</span></span>
-                      <button className="seg" onClick={() => {
-                        if (piResult.total > 0) setInflWeights(s => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, +((+v / piResult.total) * 100).toFixed(1)])));
-                      }}>Normalise to 100%</button>
-                    </div>
-                    {PI_CATS.map(c => (
-                      <div key={c.code} style={{ padding: "8px 0", borderTop: `1px solid ${C.line}` }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
-                          <span style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12 }}>
-                            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginRight: 6 }}>{c.code}</span>
-                            {c.en}
-                            <span style={{ display: "block", fontSize: 10, color: C.inkFaint }}>{c.de}</span>
-                          </span>
-                          <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, whiteSpace: "nowrap", marginLeft: 8,
-                            color: c.s[piResult.yi] - 100 >= 0 ? C.red : C.green }}>
-                            {c.s[piResult.yi] - 100 >= 0 ? "+" : ""}{(c.s[piResult.yi] - 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 56px", gap: 8, alignItems: "center" }}>
-                          <input type="range" min="0" max="50" step="0.5" className="btc-range"
-                            value={inflWeights[c.code] || 0}
-                            onChange={(e) => setInflWeights(s => ({ ...s, [c.code]: Math.max(0, parseFloat(e.target.value)) }))} />
-                          <input type="number" min="0" step="0.5" value={inflWeights[c.code] || 0}
-                            onChange={(e) => setInflWeights(s => ({ ...s, [c.code]: Math.max(0, parseFloat(e.target.value) || 0) }))}
-                            style={{ width: 56, textAlign: "right", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6,
-                              color: C.ink, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "4px 6px", outline: "none" }} />
-                        </div>
-                      </div>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>
+                  Source: {sourceLabel || "—"} · index back to {piResult.yMin}
+                </div>
+                {isEuro && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+                    {Object.entries(EURO_GEOS).map(([k, g]) => (
+                      <button key={k} className={`seg ${euroGeo === k ? "on" : ""}`} onClick={() => setEuroGeo(k)}
+                        style={{ fontSize: 11, padding: "5px 9px" }}>{g.label}</button>
                     ))}
-                  </section>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim }}>
+                  <span>Average</span>
+                  <select value={piResult.start} onChange={e => setInflStart(+e.target.value)}
+                    style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "5px 7px" }}>
+                    {winYears.filter(y => y < piResult.end).map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                  <span>→</span>
+                  <select value={piResult.end} onChange={e => setInflEnd(+e.target.value)}
+                    style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "5px 7px" }}>
+                    {winYears.filter(y => y > piResult.start).map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
                 </div>
+                <div style={{ display: "flex", gap: 5 }}>
+                  <button className={`seg ${piResult.end - piResult.start === 5 ? "on" : ""}`} onClick={() => setWindow(5)} style={{ fontSize: 11 }}>5y</button>
+                  <button className={`seg ${piResult.end - piResult.start === 10 ? "on" : ""}`} onClick={() => setWindow(10)} style={{ fontSize: 11 }}>10y</button>
+                  <button className={`seg ${piResult.start === piResult.yMin ? "on" : ""}`} onClick={() => setWindow(999)} style={{ fontSize: 11 }}>Since {piResult.yMin}</button>
+                </div>
+              </div>
+            </div>
 
-                {/* CTA */}
-                <div className="card" style={{ marginTop: 22, padding: "18px 22px", border: `1px solid ${C.orange}`,
-                  display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-                  <div>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.orange, marginBottom: 4 }}>Your personal inflation rate</div>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 26, fontWeight: 600, color: C.ink }}>
-                      {piResult.youAnnual.toFixed(1)}% / yr
-                      {yourInflRate !== null && <span style={{ fontSize: 12, color: C.green, marginLeft: 14 }}>✓ applied</span>}
-                    </div>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginTop: 4 }}>
-                      Destatis DE · 2020–{inflEndYear} · {piResult.total.toFixed(0)}% weight allocated
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => { setYourInflRate(piResult.youAnnual / 100); setTab("retirement"); }}
-                      style={{ background: C.orange, color: C.bg, border: "none", borderRadius: 8, padding: "11px 20px",
-                        fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                      Use this rate ↓
-                    </button>
-                    {yourInflRate !== null && (
-                      <button onClick={() => setYourInflRate(null)} className="seg" style={{ border: `1px solid ${C.line}` }}>Clear</button>
-                    )}
-                  </div>
+            <div className="grid-wrap" style={{ display: "grid", gap: 22, gridTemplateColumns: haveBasket ? "minmax(0,1fr) minmax(0,1fr)" : "minmax(0,1fr)" }}>
+              {/* Left: readout */}
+              <section className="card" style={{ padding: 22 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, fontSize: "clamp(48px,9vw,78px)", color: C.orange, lineHeight: 0.9, marginBottom: 6 }}>
+                  {animInfl >= 0 ? "+" : ""}{animInfl.toFixed(1)}%
                 </div>
-              </>
-            )}
+                <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, color: C.inkDim, marginBottom: 22 }}>
+                  per year · {haveBasket ? "your basket" : "headline CPI"} · {piResult.start}–{piResult.end}
+                </div>
+                <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 22 }}>
+                  <Stat label="Official headline" big={`${piResult.offAnnual.toFixed(1)}%/yr`} color={C.inkDim} />
+                  {haveBasket && <Stat label="Gap vs official" big={`${piResult.youAnnual - piResult.offAnnual >= 0 ? "+" : ""}${(piResult.youAnnual - piResult.offAnnual).toFixed(1)}%`}
+                    color={piResult.youAnnual > piResult.offAnnual ? C.red : C.green} />}
+                </div>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim, marginBottom: 20, lineHeight: 1.55 }}>
+                  What cost <span style={{ color: C.ink }}>{cur}100</span> in {piResult.start} now costs{" "}
+                  <span style={{ color: C.orange, fontWeight: 600 }}>{cur}{(haveBasket ? piResult.youIdx : piResult.offIdx).toFixed(2)}</span>
+                  {haveBasket && <> — official basket says <span style={{ color: C.inkDim }}>{cur}{piResult.offIdx.toFixed(2)}</span></>}.
+                </div>
+                <ResponsiveContainer width="100%" height={210}>
+                  <LineChart data={piResult.series} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
+                    <CartesianGrid stroke={C.line} vertical={false} />
+                    <XAxis dataKey="year" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
+                    <YAxis domain={["dataMin - 2", "dataMax + 2"]} stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
+                    <Tooltip content={<TTg fmt={v => v.toFixed(1)} />} />
+                    <ReferenceLine x={piResult.start} stroke={C.inkFaint} strokeDasharray="3 3" />
+                    <Line type="monotone" dataKey="official" stroke={C.inkDim} strokeWidth={1.5} dot={false} strokeDasharray="4 3" name="Official" connectNulls />
+                    {haveBasket && <Line type="monotone" dataKey="you" stroke={C.orange} strokeWidth={2.5} dot={false} name="You" connectNulls />}
+                    <ReferenceDot x={piResult.end} y={haveBasket ? piResult.youIdx : piResult.offIdx} r={4} fill={C.orange} stroke={C.bg} strokeWidth={2} />
+                  </LineChart>
+                </ResponsiveContainer>
+                {haveBasket && (
+                  <div style={{ marginTop: 16, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.inkDim, marginBottom: 8 }}>
+                      Contribution to your inflation · {piResult.start}–{piResult.end}
+                    </div>
+                    {piResult.contrib.map(c => {
+                      const pos = c.contribution >= 0;
+                      const wpx = (Math.abs(c.contribution) / piResult.maxAbs) * 44;
+                      return (
+                        <div key={c.code} style={{ display: "grid", gridTemplateColumns: "22px 1fr 80px 52px", gap: 8, alignItems: "center", padding: "5px 0", borderTop: `1px solid ${C.line}` }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>{c.code}</span>
+                          <span style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12 }}>{c.en}</span>
+                          <div style={{ position: "relative", height: 14 }}>
+                            <div style={{ position: "absolute", left: pos ? "50%" : `${50 - wpx}%`, width: `${wpx}%`, top: 2, height: 10, borderRadius: 2, background: pos ? C.red : C.green, opacity: c.weight === 0 ? 0.2 : 0.8 }} />
+                            <div style={{ position: "absolute", left: "50%", top: -1, bottom: -1, width: 1, background: C.line }} />
+                          </div>
+                          <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, textAlign: "right", color: pos ? C.red : C.green }}>
+                            {pos ? "+" : "−"}{Math.abs(c.contribution).toFixed(1)}%
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              {/* Right: spending-mix controls (euro basket only) */}
+              {haveBasket ? (
+                <section className="card" style={{ padding: 22, alignSelf: "start" }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.inkDim, marginBottom: 14 }}>
+                    Set your spending mix · {EURO_GEOS[euroGeo].label}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+                    {[["official","Official basket"],["foodrent","Food & rent heavy"],["car","Car commuter"],["even","Even split"]].map(([k, lab]) => (
+                      <button key={k} className="seg" onClick={() => setInflWeights(PI_PRESETS[k])} style={{ fontSize: 11 }}>{lab}</button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10,
+                    fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim }}>
+                    <span>Total: <span style={{ color: Math.abs(piResult.total - 100) < 0.5 ? C.ink : C.orange, fontWeight: 600 }}>{piResult.total.toFixed(1)}%</span></span>
+                    <button className="seg" onClick={() => {
+                      if (piResult.total > 0) setInflWeights(s => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, +((+v / piResult.total) * 100).toFixed(1)])));
+                    }}>Normalise to 100%</button>
+                  </div>
+                  {PI_CATS.map(c => (
+                    <div key={c.code} style={{ padding: "8px 0", borderTop: `1px solid ${C.line}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                        <span style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkFaint, marginRight: 6 }}>{c.code}</span>
+                          {c.en}
+                        </span>
+                        <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, whiteSpace: "nowrap", marginLeft: 8,
+                          color: (catChg[c.code] || 0) >= 0 ? C.red : C.green }}>
+                          {(catChg[c.code] || 0) >= 0 ? "+" : ""}{(catChg[c.code] || 0).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 56px", gap: 8, alignItems: "center" }}>
+                        <input type="range" min="0" max="50" step="0.5" className="btc-range"
+                          value={inflWeights[c.code] || 0}
+                          onChange={(e) => setInflWeights(s => ({ ...s, [c.code]: Math.max(0, parseFloat(e.target.value)) }))} />
+                        <input type="number" min="0" step="0.5" value={inflWeights[c.code] || 0}
+                          onChange={(e) => setInflWeights(s => ({ ...s, [c.code]: Math.max(0, parseFloat(e.target.value) || 0) }))}
+                          style={{ width: 56, textAlign: "right", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6,
+                            color: C.ink, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "4px 6px", outline: "none" }} />
+                      </div>
+                    </div>
+                  ))}
+                </section>
+              ) : (
+                <section className="card" style={{ padding: 22, alignSelf: "start", display: isEuro ? "block" : "none" }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: C.inkDim, lineHeight: 1.6 }}>
+                    {basketLoading ? "Loading the per-category basket…" : "Detailed per-category basket weighting is available for euro-area countries. Other regions use the live headline CPI above."}
+                  </div>
+                </section>
+              )}
+            </div>
+
+            {/* CTA — projection inflation now auto-tracks this rate (#5) */}
+            <div className="card" style={{ marginTop: 22, padding: "18px 22px", border: `1px solid ${C.orange}`,
+              display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.orange, marginBottom: 4 }}>Your inflation rate · feeds the projection</div>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 26, fontWeight: 600, color: C.ink }}>
+                  {piResult.youAnnual.toFixed(1)}% / yr
+                  {!inflOverride && <span style={{ fontSize: 12, color: C.green, marginLeft: 14 }}>✓ auto-applied</span>}
+                  {inflOverride && <span style={{ fontSize: 12, color: C.inkFaint, marginLeft: 14 }}>projection overridden</span>}
+                </div>
+                <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginTop: 4 }}>
+                  {sourceLabel} · {piResult.start}–{piResult.end}{haveBasket ? ` · ${piResult.total.toFixed(0)}% weight allocated` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {inflOverride && (
+                  <button onClick={resetInflAuto} className="seg" style={{ border: `1px solid ${C.line}` }}>↺ Re-link projection</button>
+                )}
+                <button onClick={() => setTab("retirement")}
+                  style={{ background: C.orange, color: C.bg, border: "none", borderRadius: 8, padding: "11px 20px",
+                    fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  See projection ↓
+                </button>
+              </div>
+            </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* ══════════════════════════════════════════
             TAB: SAVINGS GOAL
