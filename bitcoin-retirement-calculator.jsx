@@ -957,15 +957,19 @@ export default function App() {
         .fade { animation: fade .5s ease both; }
         @keyframes fade { from { opacity:0; transform:translateY(8px);} to {opacity:1; transform:none;} }
         @media (max-width:820px){ .grid-wrap{ grid-template-columns:1fr !important; } }
+        @media (max-width:640px){
+          .header-main { flex-direction: column; }
+          .header-market { width: 100%; justify-content: flex-start; }
+        }
       `}</style>
 
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: "clamp(20px,4vw,44px)", overflowX: "hidden" }}>
-        <header className="fade" style={{ marginBottom: 26, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
-          <div>
+        <header className="fade header-main" style={{ marginBottom: 26, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+          <div className="header-brand">
             <div style={{ display: "flex", alignItems: "center", gap: 10, color: C.orange,
               fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, letterSpacing: ".22em", textTransform: "uppercase" }}>
               <span style={{ width: 26, height: 26, borderRadius: "50%", background: C.orange, color: C.bg,
-                display: "grid", placeItems: "center", fontWeight: 700, fontSize: 16 }}>₿</span>
+                display: "grid", placeItems: "center", fontWeight: 700, fontSize: 16, flexShrink: 0 }}>₿</span>
               Sound Money · Retirement Engine
             </div>
             <h1 style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: "clamp(34px,6vw,60px)",
@@ -978,7 +982,7 @@ export default function App() {
             </p>
           </div>
           {/* Live market + currency picker — single row */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, paddingTop: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <div className="header-market" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, paddingTop: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "4px 10px", flexWrap: "wrap",
               padding: "7px 12px", background: "rgba(255,255,255,.03)", borderRadius: 8,
               fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim }}>
