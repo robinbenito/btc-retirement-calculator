@@ -120,6 +120,8 @@ async function fetchWorldBankCPI(iso3List) {
     if (!key) continue;
     (out[key] ||= {})[+row.date] = row.value;
   }
+  // euro-area aggregate is sometimes reported under the 2-char code "XC" instead of "EMU"
+  if (out.XC && !out.EMU) out.EMU = out.XC;
   return out;   // { ISO3: { year: index } }
 }
 
@@ -155,7 +157,9 @@ function jsonStatLookup(ds, sel) {
   for (let i = 0; i < dimIds.length; i++) {
     const dim = dimIds[i];
     const cats = ds.dimension[dim].category.index;
-    const pos = Array.isArray(cats) ? cats.indexOf(sel[dim]) : cats[sel[dim]];
+    let pos;
+    if (sel[dim] == null) { if (sizes[i] === 1) pos = 0; else return null; }   // skip singleton dims (freq/unit)
+    else pos = Array.isArray(cats) ? cats.indexOf(sel[dim]) : cats[sel[dim]];
     if (pos == null || pos < 0) return null;
     let stride = 1;
     for (let k = i + 1; k < sizes.length; k++) stride *= sizes[k];
