@@ -11,9 +11,11 @@ A personal finance tool for planning retirement around a Bitcoin stack. Models a
 ### Retirement tab
 - **Portfolio chart** — year-by-year BTC balance and fiat value from now to plan-until age, with BTC price curve overlay and stress-test mode (simulated crash + recovery)
 - **Forever Stack** — minimum BTC needed at retirement to sustain your spending until plan-until age, solved via the same depletion model as the portfolio chart; chart shows required vs. accumulated BTC across all possible retirement ages
+- **Auto income mode** — the inverse of the Forever Stack: fix a retire age, BTC, and DCA, and the tool solves the largest inflation-adjusted income the stack sustains to your plan-until age
 - **Bridge Stack** — two-phase retirement: DCA fills the "forever" bucket first; surplus sats shift your retirement age earlier
 - **Monte Carlo** — volatility bands around the power-law trend (mean-reverting log-normal paths, configurable vol decay)
 - **Compare mode** — run two scenarios side by side
+- **Inflation auto-link** — the projection's inflation rate tracks the *My Inflation* rate automatically; drag the slider to override, one click to re-link
 
 ### Price models
 | Model | Description |
@@ -23,8 +25,19 @@ A personal finance tool for planning retirement around a Bitcoin stack. Models a
 | Flat CAGR | Simple compound annual growth rate |
 
 ### Other tabs
-- **My Inflation** — Eurozone CPI basket tool (Destatis data); weight your own basket and compare to the official headline rate
+- **My Inflation** — live CPI for every supported country (World Bank, back to 2010) with a movable averaging window (default 5-year); euro-area users pick their exact country (Eurostat per-COICOP basket) and weight their own spending mix. Falls back to embedded Destatis data when offline.
 - **Savings Goal** — reach a target fiat value (e.g. a house) via BTC appreciation + DCA, with real/nominal toggle and clipped chart window
+
+### Localization
+- Country/currency auto-detected by IP on first load (manual picks always win); the detected region is flagged in the picker.
+
+### Live data sources
+- **BTC spot** — CoinGecko (multi-currency), with USD exchange fallbacks
+- **Headline CPI** — World Bank `FP.CPI.TOTL` (annual, 2010→present)
+- **Euro-area COICOP basket** — Eurostat `prc_hicp_aind`
+- **IP geolocation** — ipwho.is → ipapi.co → geojs.io
+
+All external feeds are best-effort and degrade gracefully to embedded data.
 
 ---
 
