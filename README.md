@@ -4,6 +4,8 @@ A personal finance tool for planning retirement around a Bitcoin stack. Models a
 
 **Live:** https://btc-retirement-calculator.vercel.app
 
+[![Buy Me a BitCoffee](https://img.shields.io/badge/Buy%20Me%20a%20BitCoffee-f7931a?logo=bitcoin&logoColor=black&color=f7931a&style=social&label=Useful%3F)](https://buymeabitcoffee.vercel.app/btc/bc1p6nrgd38nmx09lm2j8ql8wg58nlfsmsh2zxyapss7ljxxvj636c0swhuqdm?identifier=Buy+Me+a+BitCoffee&lightning=civicdrone297%40walletofsatoshi.com)  [![Regular Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black&style=social)](https://www.buymeacoffee.com/rgaston)
+
 ---
 
 ## Features
