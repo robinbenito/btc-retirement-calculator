@@ -636,14 +636,33 @@ function Field({ label, suffix, children }) {
     </label>
   );
 }
+// A locale-independent numeric input. Uses type="text" + inputMode="decimal" so the field always
+// uses a period as the decimal separator (a browser number input localises to "0,5" in e.g. German
+// locales — #17) and keeps a raw text buffer so partial entries like "" / "0." / "1." are editable
+// instead of snapping back to a stuck leading zero (#12).
 function NumIn({ value, onChange, prefix, step = 1, min = 0, disabled = false }) {
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  // mirror external value changes (live price, presets, auto-income) only while not editing
+  useEffect(() => { if (!focused.current) setText(String(value)); }, [value]);
+  const handle = (e) => {
+    const v = e.target.value;
+    if (!/^-?[0-9]*[.,]?[0-9]*$/.test(v)) return;   // reject anything non-numeric, accept , or .
+    setText(v);
+    const norm = v.replace(",", ".");
+    if (norm === "" || norm === "." || norm === "-" || norm === "-.") { onChange(0); return; }
+    const n = parseFloat(norm);
+    if (isFinite(n)) onChange(n);
+  };
   return (
     <div style={{ display: "flex", alignItems: "center", background: C.panel2,
       border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden", opacity: disabled ? 0.4 : 1 }}>
       {prefix && <span style={{ padding: "0 10px", color: C.orange, fontFamily: "'IBM Plex Mono',monospace",
         fontSize: 15, borderRight: `1px solid ${C.line}` }}>{prefix}</span>}
-      <input type="number" value={value} step={step} min={min} disabled={disabled}
-        onChange={(e) => onChange(e.target.value === "" ? 0 : parseFloat(e.target.value))}
+      <input type="text" inputMode="decimal" value={text} disabled={disabled}
+        onFocus={() => { focused.current = true; }}
+        onBlur={(e) => { focused.current = false; const n = parseFloat(e.target.value.replace(",", ".")); setText(isFinite(n) ? String(n) : "0"); }}
+        onChange={handle}
         style={{ flex: 1, width: "100%", background: "transparent", border: "none", outline: "none",
           color: C.ink, fontFamily: "'IBM Plex Mono',monospace", fontSize: 16, padding: "11px 12px",
           cursor: disabled ? "default" : "auto" }} />
@@ -902,6 +921,7 @@ export default function App() {
 
   /* ── #2: auto retirement income — solve sustainable income from a fixed retire age ── */
   const [autoIncome, setAutoIncome] = useState(false);
+  const [incomeUnit, setIncomeUnit] = useState("yr");   // #13: display retirement income per year or per month
 
   /* ── Savings goal state ── */
   const [goal, setGoal] = useState({ name:"Dream Car", category:"car", valueToday:50000, goalInfl:0.045, age:34, currentBtc:0.5, monthly:400 });
@@ -1430,21 +1450,36 @@ export default function App() {
             <Field label="Monthly buy (DCA)" suffix="per month"><NumIn value={p.monthly} onChange={(v) => up("monthly", v)} prefix={cur} step={50} /></Field>
             <label style={{ display: "block", marginBottom: 18 }}>
               <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em",
-                textTransform: "uppercase", color: C.inkDim, marginBottom: 7, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                textTransform: "uppercase", color: C.inkDim, marginBottom: 7, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                 <span>{autoIncome ? "Income your stack supports" : "Retirement income wanted"}</span>
-                <button onClick={toggleAutoIncome} style={{
-                  background: autoIncome ? "rgba(127,176,105,.18)" : "rgba(255,255,255,.06)",
-                  border: `1px solid ${autoIncome ? C.green : C.line}`,
-                  borderRadius: 4, padding: "1px 8px", fontSize: 10,
-                  fontFamily: "'IBM Plex Mono',monospace", letterSpacing: ".08em",
-                  color: autoIncome ? C.green : C.inkDim, cursor: "pointer", lineHeight: 1.8, whiteSpace: "nowrap"
-                }}>{autoIncome ? "● auto" : "○ auto"}</button>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  {/* #13: per-year / per-month unit toggle (income stored internally as annual) */}
+                  <div style={{ display: "flex", border: `1px solid ${C.line}`, borderRadius: 4, overflow: "hidden" }}>
+                    {[["yr", "/yr"], ["mo", "/mo"]].map(([u, lab]) => (
+                      <button key={u} onClick={() => setIncomeUnit(u)} style={{
+                        background: incomeUnit === u ? C.panel2 : "transparent",
+                        border: "none", padding: "2px 7px", fontSize: 10,
+                        fontFamily: "'IBM Plex Mono',monospace", letterSpacing: ".06em",
+                        color: incomeUnit === u ? C.ink : C.inkFaint, cursor: "pointer", lineHeight: 1.8 }}>{lab}</button>
+                    ))}
+                  </div>
+                  <button onClick={toggleAutoIncome} style={{
+                    background: autoIncome ? "rgba(127,176,105,.18)" : "rgba(255,255,255,.06)",
+                    border: `1px solid ${autoIncome ? C.green : C.line}`,
+                    borderRadius: 4, padding: "1px 8px", fontSize: 10,
+                    fontFamily: "'IBM Plex Mono',monospace", letterSpacing: ".08em",
+                    color: autoIncome ? C.green : C.inkDim, cursor: "pointer", lineHeight: 1.8, whiteSpace: "nowrap"
+                  }}>{autoIncome ? "● auto" : "○ auto"}</button>
+                </div>
               </div>
-              <NumIn value={p.spend} onChange={(v) => up("spend", v)} prefix={cur} step={1000} disabled={autoIncome} />
+              <NumIn
+                value={incomeUnit === "mo" ? Math.round(p.spend / 12) : p.spend}
+                onChange={(v) => up("spend", incomeUnit === "mo" ? Math.round(v * 12) : v)}
+                prefix={cur} step={incomeUnit === "mo" ? 100 : 1000} disabled={autoIncome} />
               <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: autoIncome ? C.green : C.inkFaint, lineHeight: 1.5, marginTop: 6 }}>
                 {autoIncome
-                  ? `Max inflation-adjusted income this stack sustains to age ${normalize(p).endAge}.`
-                  : "today's money / yr — or switch on auto to solve income from your retire age."}
+                  ? `Max inflation-adjusted income this stack sustains to age ${normalize(p).endAge}${incomeUnit === "mo" ? " (shown per month)" : ""}.`
+                  : `today's money / ${incomeUnit === "mo" ? "mo" : "yr"} — or switch on auto to solve income from your retire age.`}
               </div>
             </label>
 
