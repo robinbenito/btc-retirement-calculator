@@ -106,11 +106,12 @@ const annualizedRate = (idx, y0, y1) =>
   (idx[y0] > 0 && idx[y1] > 0 && y1 > y0) ? Math.pow(idx[y1] / idx[y0], 1 / (y1 - y0)) - 1 : 0;
 
 /* "Verify, don't trust" — every inflation figure links back to its primary source (#8). */
+const DESTATIS_URL = "https://www-genesis.destatis.de/genesis/online?operation=table&code=61111-0001";
 const DATA_SOURCE_URLS = {
   "World Bank":        "https://data.worldbank.org/indicator/FP.CPI.TOTL",
   "Eurostat":          "https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_aind/default/table",
-  "Destatis (offline)":"https://www-genesis.destatis.de/genesis/online?operation=table&code=61111-0001",
-  "Destatis DE proxy": "https://www-genesis.destatis.de/genesis/online?operation=table&code=61111-0001",
+  "Destatis (offline)":DESTATIS_URL,
+  "Destatis DE proxy": DESTATIS_URL,
   "CoinGecko":         "https://www.coingecko.com/en/coins/bitcoin",
 };
 const sourceUrlFor = (name) => DATA_SOURCE_URLS[name] || DATA_SOURCE_URLS[String(name).replace(/\s*\(offline\)$/, "")];
@@ -140,22 +141,15 @@ const EURO_MEMBERS = {
   AT:"AT", BE:"BE", FI:"FI", FR:"FR", DE:"DE", GR:"GR", IE:"IE", IT:"IT", NL:"NL", PT:"PT", ES:"ES",
   HR:null, CY:null, EE:null, LV:null, LT:null, LU:null, MT:null, SK:null, SI:null,
 };
-/* Best-effort IP geolocation → ISO2 country code (free, CORS-enabled sources). (#4) */
+/* Best-effort IP geolocation → ISO2 country code (free, CORS-enabled). Convenience only —
+   the user can override the country, so one source is enough. (#4) */
 async function fetchGeoCountry() {
-  const tries = [
-    { url: "https://ipwho.is/",       pick: j => j.success === false ? null : j.country_code },
-    { url: "https://ipapi.co/json/",  pick: j => j.country_code || j.country },
-    { url: "https://get.geojs.io/v1/ip/country.json", pick: j => j.country },
-  ];
-  for (const t of tries) {
-    try {
-      const r = await fetch(t.url);
-      if (!r.ok) continue;
-      const code = t.pick(await r.json());
-      if (code) return String(code).toUpperCase();
-    } catch (e) { /* try next */ }
-  }
-  return null;
+  try {
+    const r = await fetch("https://ipwho.is/");
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j.success === false || !j.country_code ? null : String(j.country_code).toUpperCase();
+  } catch (e) { return null; }
 }
 
 /* Minimal JSON-stat 2.0 reader: returns value at the given dimension-category map. */
@@ -203,27 +197,6 @@ async function fetchEurostatBasket(geo) {
     cats[code] = series;
   });
   return { years: years.filter(y => headline[y] != null), headline, cats };
-}
-
-/* Smooth animated number for the personal inflation display */
-function useAnimatedNumber(target, ms = 600) {
-  const [val, setVal] = useState(target);
-  const from = useRef(target);
-  useEffect(() => {
-    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) { setVal(target); from.current = target; return; }
-    let raf, t0; const start = from.current;
-    const tick = (t) => {
-      if (!t0) t0 = t;
-      const k = Math.min(1, (t - t0) / ms);
-      const e = 1 - Math.pow(1 - k, 3);
-      setVal(start + (target - start) * e);
-      if (k < 1) raf = requestAnimationFrame(tick); else from.current = target;
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, ms]);
-  return val;
 }
 
 const GENESIS_YEAR = 2009 + 2 / 365.25;                 // Jan 3, 2009
@@ -739,6 +712,13 @@ function TTvalue({ active, payload, sym, real, compare }) {
     {d.aPrice != null && <div style={{ color: C.inkDim, marginTop: 2, fontSize: 11 }}>BTC {fmtMoney(d.aPrice, sym)}</div>}
   </>);
 }
+// Shared age / value / BTC axes for the portfolio + Monte-Carlo charts. Returns an array (not a
+// fragment) so recharts' React.Children walk flattens and detects each axis.
+const ageValBtcAxes = (cur) => [
+  <XAxis key="x" dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />,
+  <YAxis key="yv" yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={v => fmtMoney(v, cur)} />,
+  <YAxis key="yb" yAxisId="btc" orientation="right" stroke={C.gold} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.gold }} tickLine={false} width={46} tickFormatter={v => `₿${v.toFixed(2)}`} opacity={0.7} />,
+];
 function PortfolioChart({ data, retireAge, pivotAge, pivotLabel, real, cur, onMouseMove, pinCursor, shockOn, shockX2, height }) {
   return (
     <ResponsiveContainer width="100%" height={height ?? 270}>
@@ -750,9 +730,7 @@ function PortfolioChart({ data, retireAge, pivotAge, pivotLabel, real, cur, onMo
           </linearGradient>
         </defs>
         <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
-        <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-        <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={v => fmtMoney(v, cur)} />
-        <YAxis yAxisId="btc" orientation="right" stroke={C.gold} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.gold }} tickLine={false} width={46} tickFormatter={v => `₿${v.toFixed(2)}`} opacity={0.7} />
+        {ageValBtcAxes(cur)}
         <Tooltip cursor={pinCursor} content={<TTvalue sym={cur} real={real} />} />
         {shockOn && <ReferenceArea yAxisId="val" x1={retireAge} x2={shockX2} fill={C.red} fillOpacity={0.18}
           label={{ value: "⚡ stress", position: "insideTop", fill: C.red, fontSize: 10, fontFamily: "IBM Plex Mono" }} />}
@@ -937,13 +915,13 @@ export default function App() {
   const isPL = p.modelType !== "cagr";
 
   /* persistent saved-scenario library */
-  useEffect(() => { (async () => {
-    try { const r = await window.storage.get(STORE_KEY); if (r && r.value) setSaved(JSON.parse(r.value)); }
+  useEffect(() => {
+    try { const v = localStorage.getItem(STORE_KEY); if (v) setSaved(JSON.parse(v)); }
     catch (e) { /* nothing stored yet */ }
-  })(); }, []);
-  const persist = async (next) => {
+  }, []);
+  const persist = (next) => {
     setSaved(next);
-    try { await window.storage.set(STORE_KEY, JSON.stringify(next)); } catch (e) { /* in-memory fallback */ }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(next)); } catch (e) { /* in-memory fallback */ }
   };
   const saveCurrent = () => {
     const name = nameInput.trim() || `Scenario ${saved.length + 1}`;
@@ -979,24 +957,17 @@ export default function App() {
         }
       }
     } catch (e) { /* fall through */ }
-    // Fallback: USD-only sources, fxRate stays 1
-    const usdSources = [
-      { name: "Coinbase",        url: "https://api.coinbase.com/v2/prices/BTC-USD/spot",               pick: (j) => parseFloat(j.data.amount) },
-      { name: "Kraken",          url: "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",            pick: (j) => parseFloat(j.result.XXBTZUSD.c[0]) },
-      { name: "Bitstamp",        url: "https://www.bitstamp.net/api/v2/ticker/btcusd/",                pick: (j) => parseFloat(j.last) },
-      { name: "Blockchain.info", url: "https://blockchain.info/ticker",                                pick: (j) => j.USD.last },
-    ];
-    for (const s of usdSources) {
-      try {
-        const r = await fetch(s.url);
-        if (!r.ok) continue;
-        const usd = s.pick(await r.json());
+    // Fallback: USD-only source (fxRate stays 1)
+    try {
+      const r = await fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot");
+      if (r.ok) {
+        const usd = parseFloat((await r.json()).data.amount);
         if (usd && isFinite(usd) && usd > 0) {
-          setLive({ status: "ok", usd, prices: { usd }, ts: Date.now(), src: s.name });
+          setLive({ status: "ok", usd, prices: { usd }, ts: Date.now(), src: "Coinbase" });
           return { usd, prices: { usd } };
         }
-      } catch (e) { /* try next */ }
-    }
+      }
+    } catch (e) { /* fall through */ }
     setLive({ status: "fail" });
     return null;
   };
@@ -1221,9 +1192,6 @@ export default function App() {
   const toggleAutoIncome = () => { setAutoIncome(v => !v); if (!autoIncome && brd.show) upBrd("show", false); };
   const toggleBridge = () => { const next = !brd.show; upBrd("show", next); if (next && autoIncome) setAutoIncome(false); };
 
-  /* ── Animated personal inflation for display ── */
-  const animInfl = useAnimatedNumber(piResult.youAnnual);
-
   /* ── Forever stack ── */
   const sharedModel = useMemo(() => modelOf(scen.A), [scen.A]);
   // Pass rA.retStack so "You'll have" in the Forever card uses the same monthly-granularity
@@ -1321,7 +1289,6 @@ export default function App() {
       backgroundImage: `radial-gradient(900px 500px at 85% -10%, rgba(247,147,26,.10), transparent 60%),
         radial-gradient(700px 500px at -10% 110%, rgba(95,176,201,.05), transparent 60%)` }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
         html, body { overflow-x: hidden; max-width: 100%; }
         input[type=number]::-webkit-inner-spin-button { opacity:.25; }
@@ -1756,9 +1723,7 @@ export default function App() {
                     <ResponsiveContainer width="100%" height={270}>
                       <ComposedChart data={merged} onMouseMove={onPin} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
                         <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
-                        <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                        <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
-                        <YAxis yAxisId="btc" orientation="right" stroke={C.gold} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.gold }} tickLine={false} width={46} tickFormatter={(v) => `₿${v.toFixed(2)}`} opacity={0.7} />
+                        {ageValBtcAxes(cur)}
                         <Tooltip cursor={pinCursor} content={<TTvalue sym={cur} real={real} compare />} />
                         <ReferenceLine yAxisId="val" x={normalize(scen.A).retireAge} stroke={C.gold} strokeDasharray="3 3" />
                         <Line yAxisId="val" type="monotone" name="A value" dataKey={"a" + VK} stroke={C.orange} strokeWidth={2} dot={false} connectNulls />
@@ -1785,9 +1750,7 @@ export default function App() {
                   <ResponsiveContainer width="100%" height={240}>
                     <ComposedChart data={mc.fanC} onMouseMove={onPin} margin={{ top: 10, right: 8, left: 4, bottom: 0 }}>
                       <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
-                      <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                      <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
-                      <YAxis yAxisId="btc" orientation="right" stroke={C.gold} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.gold }} tickLine={false} width={46} tickFormatter={(v) => `₿${v.toFixed(2)}`} opacity={0.7} />
+                      {ageValBtcAxes(cur)}
                       <Tooltip cursor={pinCursor} content={<TTmc sym={cur} compare />} />
                       <ReferenceLine yAxisId="val" x={normalize(scen.A).retireAge} stroke={C.orange} strokeDasharray="3 3" opacity={0.5} />
                       <ReferenceLine yAxisId="val" x={normalize(scen.B).retireAge} stroke={C.blue} strokeDasharray="3 3" opacity={0.5} />
@@ -1820,9 +1783,7 @@ export default function App() {
                   <ResponsiveContainer width="100%" height={240}>
                     <ComposedChart data={mc.fan} onMouseMove={onPin} margin={{ top: 10, right: 8, left: 4, bottom: 0 }}>
                       <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
-                      <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                      <YAxis yAxisId="val" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={(v) => fmtMoney(v, cur)} />
-                      <YAxis yAxisId="btc" orientation="right" stroke={C.gold} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.gold }} tickLine={false} width={46} tickFormatter={(v) => `₿${v.toFixed(2)}`} opacity={0.7} />
+                      {ageValBtcAxes(cur)}
                       <Tooltip cursor={pinCursor} content={<TTmc sym={cur} />} />
                       <ReferenceLine yAxisId="val" x={normalize(scen[mc.scen]).retireAge} stroke={C.gold} strokeDasharray="3 3"
                         label={{ value: "retire", fill: C.gold, fontSize: 10, position: "insideTopRight" }} />
@@ -2121,7 +2082,7 @@ export default function App() {
               {/* Left: readout */}
               <section className="card" style={{ padding: 22 }}>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, fontSize: "clamp(48px,9vw,78px)", color: C.orange, lineHeight: 0.9, marginBottom: 6 }}>
-                  {animInfl >= 0 ? "+" : ""}{animInfl.toFixed(1)}%
+                  {piResult.youAnnual >= 0 ? "+" : ""}{piResult.youAnnual.toFixed(1)}%
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, color: C.inkDim, marginBottom: 22 }}>
                   per year · {haveBasket ? "your basket" : "headline CPI"} · {piResult.start}–{piResult.end}
