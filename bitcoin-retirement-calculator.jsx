@@ -105,6 +105,16 @@ const PI_FALLBACK_HEADLINE = [88.6, 90.5, 92.3, 93.7, 94.6, 95.0, 95.4, 96.8, 98
 const annualizedRate = (idx, y0, y1) =>
   (idx[y0] > 0 && idx[y1] > 0 && y1 > y0) ? Math.pow(idx[y1] / idx[y0], 1 / (y1 - y0)) - 1 : 0;
 
+/* "Verify, don't trust" — every inflation figure links back to its primary source (#8). */
+const DATA_SOURCE_URLS = {
+  "World Bank":        "https://data.worldbank.org/indicator/FP.CPI.TOTL",
+  "Eurostat":          "https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_aind/default/table",
+  "Destatis (offline)":"https://www-genesis.destatis.de/genesis/online?operation=table&code=61111-0001",
+  "Destatis DE proxy": "https://www-genesis.destatis.de/genesis/online?operation=table&code=61111-0001",
+  "CoinGecko":         "https://www.coingecko.com/en/coins/bitcoin",
+};
+const sourceUrlFor = (name) => DATA_SOURCE_URLS[name] || DATA_SOURCE_URLS[String(name).replace(/\s*\(offline\)$/, "")];
+
 async function fetchWorldBankCPI(iso3List) {
   const codes = iso3List.join(";");
   const url = `https://api.worldbank.org/v2/country/${codes}/indicator/FP.CPI.TOTL?format=json&per_page=5000&date=2010:2025`;
@@ -587,6 +597,24 @@ function simulateBridgeFull(brd, model, endAge) {
 }
 
 /* ── UI atoms ───────────────────────────────────────────────── */
+/* Renders a " · "-joined source label, linking each known source to its primary data (#8). */
+function SourceCite({ label, color = C.inkFaint }) {
+  const parts = String(label || "").split(" · ").filter(Boolean);
+  if (!parts.length) return <span style={{ color }}>—</span>;
+  return parts.map((name, i) => {
+    const url = sourceUrlFor(name);
+    return (
+      <React.Fragment key={i}>
+        {i > 0 && <span style={{ color }}> · </span>}
+        {url ? (
+          <a href={url} target="_blank" rel="noopener noreferrer"
+            style={{ color: C.blue, textDecoration: "underline", textUnderlineOffset: 2 }}
+            title={`Verify: ${name} primary data ↗`}>{name} ↗</a>
+        ) : <span style={{ color }}>{name}</span>}
+      </React.Fragment>
+    );
+  });
+}
 function Field({ label, suffix, children }) {
   return (
     <label style={{ display: "block", marginBottom: 18 }}>
@@ -1107,16 +1135,26 @@ export default function App() {
       return { ...c, share: w, weight: inflWeights[c.code] || 0, chg, contribution: w * chg };
     }).sort((a, b) => b.contribution - a.contribution);
     const maxAbs = Math.max(0.01, ...contrib.map(c => Math.abs(c.contribution)));
+    // explicit, sane y-range for the CPI index chart (the rebased series sits near 100) so the
+    // axis can never auto-scale to a stray/huge value (#14)
+    const seriesVals = series.flatMap(r => [r.official, r.you]).filter(v => v != null && isFinite(v));
+    const seriesLo = seriesVals.length ? Math.floor(Math.min(...seriesVals) - 2) : 90;
+    const seriesHi = seriesVals.length ? Math.ceil(Math.max(...seriesVals) + 2) : 130;
     return { total, series, youIdx, offIdx, youAnnual, offAnnual, categoryRates, contrib, maxAbs,
-      start, end, bStart, haveBasket, yMin, yMax };
+      start, end, bStart, haveBasket, yMin, yMax, seriesLo, seriesHi };
   }, [inflWeights, inflStart, inflEnd, inflData]);
 
-  // keep the averaging window inside the available data range as the source/country changes
+  // keep the averaging window inside the available data range as the source/country changes.
+  // When the end has to be clamped (e.g. live data only runs to 2024 but the default asked for
+  // 2025), re-anchor the start to a clean 5-year span so the default matches the "5y" shortcut (#18).
   useEffect(() => {
     const { yMin, yMax } = piResult;
     if (yMax == null) return;
-    if (inflEnd > yMax || inflEnd <= yMin) setInflEnd(yMax);
-    if (inflStart < yMin || inflStart >= (inflEnd > yMax ? yMax : inflEnd)) setInflStart(Math.max(yMin, (inflEnd > yMax ? yMax : inflEnd) - 5));
+    let end = inflEnd, start = inflStart;
+    if (end > yMax || end <= yMin) { end = yMax; start = Math.max(yMin, end - 5); }
+    else if (start < yMin || start >= end) { start = Math.max(yMin, end - 5); }
+    if (end !== inflEnd) setInflEnd(end);
+    if (start !== inflStart) setInflStart(start);
   }, [piResult.yMin, piResult.yMax]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── #5: projection inflation auto-tracks the My Inflation rate unless the user overrides ── */
@@ -1906,7 +1944,7 @@ export default function App() {
                   {COUNTRIES[country].flag} {COUNTRIES[country].label} · live CPI{!headLive ? " (offline)" : ""}
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>
-                  Source: {sourceLabel || "—"} · index back to {piResult.yMin}
+                  Source: <SourceCite label={sourceLabel} /> · index back to {piResult.yMin}
                 </div>
                 {isEuro && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
@@ -1961,7 +1999,8 @@ export default function App() {
                   <LineChart data={piResult.series} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
                     <CartesianGrid stroke={C.line} vertical={false} />
                     <XAxis dataKey="year" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                    <YAxis domain={["dataMin - 2", "dataMax + 2"]} stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
+                    <YAxis domain={[piResult.seriesLo, piResult.seriesHi]} allowDataOverflow allowDecimals={false}
+                      stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} tickFormatter={v => Math.round(v)} />
                     <Tooltip content={<TTg fmt={v => v.toFixed(1)} />} />
                     <ReferenceLine x={piResult.start} stroke={C.inkFaint} strokeDasharray="3 3" />
                     <Line type="monotone" dataKey="official" stroke={C.inkDim} strokeWidth={1.5} dot={false} strokeDasharray="4 3" name="Official" connectNulls />
@@ -2057,7 +2096,7 @@ export default function App() {
                   {inflOverride && <span style={{ fontSize: 12, color: C.inkFaint, marginLeft: 14 }}>projection overridden</span>}
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginTop: 4 }}>
-                  {sourceLabel} · {piResult.start}–{piResult.end}{haveBasket ? ` · ${piResult.total.toFixed(0)}% weight allocated` : ""}
+                  <SourceCite label={sourceLabel} /> · {piResult.start}–{piResult.end}{haveBasket ? ` · ${piResult.total.toFixed(0)}% weight allocated` : ""}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
