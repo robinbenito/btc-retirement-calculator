@@ -277,10 +277,10 @@ function simulate(p) {
     const r = { age: a, btc: s, price, value: s * price, valueReal: (s * price) / Math.pow(1 + infl, y), sats: s * SATS };
     if (a < retireAge) {
       r.buySats = (monthly / price) * SATS;
-      r.flowKind = "buy"; r.flowSatsYr = r.buySats * 12; r.cashYr = monthly * 12;
+      r.flowKind = "buy"; r.flowSatsYr = r.buySats * 12; r.cashYr = monthly * 12; r.cashYrReal = monthly * 12;
     } else {
       r.sellSats = (((spend / 12) * Math.pow(1 + infl, y)) / price) * SATS;
-      r.flowKind = "sell"; r.flowSatsYr = r.sellSats * 12; r.cashYr = spend * Math.pow(1 + infl, y);
+      r.flowKind = "sell"; r.flowSatsYr = r.sellSats * 12; r.cashYr = spend * Math.pow(1 + infl, y); r.cashYrReal = spend;
     }
     return r;
   };
@@ -329,7 +329,7 @@ function merge(A, B) {
     const e = m.get(r.age) || { age: r.age };
     e[pre + "V"] = r.value; e[pre + "VR"] = r.valueReal; e[pre + "B"] = r.btc;
     e[pre + "S"] = r.sats; e[pre + "Buy"] = r.buySats; e[pre + "Sell"] = r.sellSats;
-    e[pre + "FlowSats"] = r.flowSatsYr; e[pre + "FlowKind"] = r.flowKind; e[pre + "Cash"] = r.cashYr;
+    e[pre + "FlowSats"] = r.flowSatsYr; e[pre + "FlowKind"] = r.flowKind; e[pre + "Cash"] = r.cashYr; e[pre + "CashReal"] = r.cashYrReal;
     e[pre + "Price"] = r.price;
     m.set(r.age, e);
   });
@@ -395,8 +395,8 @@ function runMC(p, vol, nPaths) {
       p50sats: pct(byYearBtc[idx], 0.5) * SATS,
       p50btc: pct(byYearBtc[idx], 0.5),
     };
-    if (aAge < retireAge) { r.flowKind = "buy"; r.flowSatsYr = ((monthly * 12) / p50price) * SATS; r.cashYr = monthly * 12; }
-    else { const income = spend * Math.pow(1 + infl, idx); r.flowKind = "sell"; r.flowSatsYr = (income / p50price) * SATS; r.cashYr = income; }
+    if (aAge < retireAge) { r.flowKind = "buy"; r.flowSatsYr = ((monthly * 12) / p50price) * SATS; r.cashYr = monthly * 12; r.cashYrReal = monthly * 12; }
+    else { const income = spend * Math.pow(1 + infl, idx); r.flowKind = "sell"; r.flowSatsYr = (income / p50price) * SATS; r.cashYr = income; r.cashYrReal = spend; }
     return r;
   });
   return {
@@ -449,6 +449,17 @@ function calcForever(p, model, accBtcIn = null) {
   const accBtc = accBtcIn !== null ? accBtcIn : accumulateBtc(p.btc, p.monthly, y, model);
   const neededDCA = reqBtc > accBtc ? solveMonthlyDCA(p.btc, reqBtc, y, model) : null;
   return { possible: true, reqBtc, reqValue, accBtc, neededDCA, impliedCagr, realReturn, p0 };
+}
+// Earliest retirement age at which the forever stack is self-sustaining for a given income (#11).
+function foreverFeasibleAge(p, income, model, endAge) {
+  const e = endAge ?? 120;
+  const maxAge = Math.min(e - 1, 90);
+  for (let ra = p.age + 1; ra <= maxAge; ra++) {
+    const accBtc = accumulateBtc(p.btc, p.monthly, ra - p.age, model);
+    const reqBtc = solveForeverBtc(income, ra, p.age, p.infl, model, e);
+    if (accBtc >= reqBtc) return ra;
+  }
+  return null;
 }
 function calcForeverCurve(p, model, endAge) {
   const endAgeEff = endAge ?? 120;
@@ -797,7 +808,9 @@ function PinTable({ row, view, real, sym }) {
         <R2 label="Balance" a={fmtSats(row.aS)} b={fmtSats(row.bS)} />
         <R2 label="Value" a={fmtMoney(real ? row.aVR : row.aV, sym)} b={fmtMoney(real ? row.bVR : row.bV, sym)} />
         <R2 label="Flow / yr" a={row.aFlowSats != null ? fmtSats(row.aFlowSats) : "—"} b={row.bFlowSats != null ? fmtSats(row.bFlowSats) : "—"} />
-        <R2 label="Cash / yr · nominal" a={row.aCash != null ? fmtMoney(row.aCash, sym) : "—"} b={row.bCash != null ? fmtMoney(row.bCash, sym) : "—"} />
+        <R2 label={`Cash / yr · ${real ? "today's $" : "nominal"}`}
+          a={(real ? row.aCashReal : row.aCash) != null ? fmtMoney(real ? row.aCashReal : row.aCash, sym) : "—"}
+          b={(real ? row.bCashReal : row.bCash) != null ? fmtMoney(real ? row.bCashReal : row.bCash, sym) : "—"} />
       </div>
     );
   }
@@ -806,13 +819,16 @@ function PinTable({ row, view, real, sym }) {
   const sell = row.flowKind === "sell";
   const balance = isMc ? row.p50sats : row.sats;
   const value = isMc ? row.p50 : (real ? row.valueReal : row.value);
+  // mc values are always today's money; single/compare follow the toggle — keep income consistent (#15)
+  const showReal = isMc || real;
+  const cash = showReal ? row.cashYrReal : row.cashYr;
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{ padding: "8px 4px 4px" }}><span style={lab}>{isMc ? "median at age " : "at age "}{row.age}</span></div>
       <R label="Balance"><span style={{ color: C.orange }}>{fmtSats(balance)}</span></R>
       <R label="Value"><span style={{ color: C.gold }}>{fmtMoney(value, sym)}</span> <span style={note}>{isMc ? "median · today's $" : real ? "today's $" : "nominal"}</span></R>
       <R label={sell ? "Selling / yr" : "Buying / yr"}><span style={{ color: sell ? C.red : C.green }}>{row.flowSatsYr != null ? fmtSats(row.flowSatsYr) : "—"}</span></R>
-      <R label={sell ? "Income / yr" : "Contributions / yr"}>{fmtMoney(row.cashYr, sym)} <span style={note}>nominal</span></R>
+      <R label={sell ? "Income / yr" : "Contributions / yr"}>{cash != null ? fmtMoney(cash, sym) : "—"} <span style={note}>{showReal ? "today's $" : "nominal"}</span></R>
     </div>
   );
 }
@@ -1195,6 +1211,14 @@ export default function App() {
   const fvrA = useMemo(() => calcForever(normalize(scen.A), sharedModel, rA.retStack), [scen.A, sharedModel, rA]);
   const fvrB = useMemo(() => compare && rB ? calcForever(normalize(scen.B), modelOf(scen.B), rB.retStack) : null, [scen.B, compare, rB]);
   const fvrCurve = useMemo(() => calcForeverCurve(normalize(scen.A), sharedModel, scen.A.endAge), [scen.A, sharedModel]);
+  // #11: how the earliest forever-feasible retirement age moves with the target income
+  const foreverTable = useMemo(() => {
+    const base = scen.A.spend, n = normalize(scen.A);
+    return [0.5, 0.75, 1, 1.25, 1.5].map(mult => {
+      const income = Math.max(0, Math.round(base * mult / 500) * 500);
+      return { income, mult, current: mult === 1, age: foreverFeasibleAge(n, income, sharedModel, scen.A.endAge) };
+    });
+  }, [scen.A, sharedModel]);
 
   /* ── Bridge stack (always computed; inherits age/btc/monthly/infl from scen.A) ── */
   const brdInput = useMemo(() => ({
@@ -1612,8 +1636,8 @@ export default function App() {
                     color: rA.lasts ? C.green : C.red }}>
                     <Dot c={rA.lasts ? C.green : C.red} />
                     {rA.lasts
-                      ? `Plan holds · survives past age ${normalize(scen.A).endAge}`
-                      : `Stack runs dry at age ${rA.depletedAge}`}
+                      ? `Plan holds · survives past age ${normalize(scen.A).endAge}${mc ? " (central projection)" : ""}`
+                      : `Stack runs dry at age ${rA.depletedAge}${mc ? " (central projection)" : ""}`}
                   </div>
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1633,6 +1657,18 @@ export default function App() {
                       <Dot c={mc.scen === "A" ? C.orange : C.blue} /> {mc.scen}</span>}
                   </div>
                 )}
+              </div>
+              {/* Inflation assumption is shared with the My Inflation tab — surface it so changes
+                  there aren't invisible here (#19) */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14,
+                fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint }}>
+                <span>Inflation assumption:</span>
+                <span style={{ color: C.ink }}>{(p.infl * 100).toFixed(1)}%/yr</span>
+                <span style={{ color: inflOverride ? C.inkFaint : C.green }}>
+                  · {inflOverride ? "manual override" : `auto from My Inflation (${COUNTRIES[country].label})`}
+                </span>
+                <button className="seg" onClick={() => setTab("inflation")}
+                  style={{ padding: "2px 8px", fontSize: 10 }}>adjust ↗</button>
               </div>
               {!mc && !compare ? (
                 <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 4 }}>
@@ -1723,8 +1759,12 @@ export default function App() {
                       big={`${(mc.successRate * 100).toFixed(0)}%`}
                       color={mc.successRate >= 0.8 ? C.green : mc.successRate >= 0.5 ? C.gold : C.red}
                       sub={`of ${mc.nPaths} paths`} />
-                    <Stat label="Median end value" big={fmtMoney(mc.medianTerminal, cur)} sub="today's money" color={C.gold} />
-                    <Stat label="Unlucky · 10th pct" big={fmtMoney(mc.p10Terminal, cur)} sub="today's money" color={C.inkDim} />
+                    <Stat label={`Median at age ${normalize(scen[mc.scen]).retireAge}`} big={fmtMoney(mc.medianRet, cur)}
+                      sub="today's $ · at retirement" color={C.gold} />
+                    <Stat label={`Median at age ${normalize(scen[mc.scen]).endAge}`} big={fmtMoney(mc.medianTerminal, cur)}
+                      sub={mc.medianTerminal > 0 ? "today's $ · what's left"
+                        : mc.medianFailAge ? `depleted — most run dry ~age ${mc.medianFailAge}` : "today's $"}
+                      color={mc.medianTerminal > 0 ? C.gold : C.red} />
                   </div>
                   <ResponsiveContainer width="100%" height={240}>
                     <ComposedChart data={mc.fan} onMouseMove={onPin} margin={{ top: 10, right: 8, left: 4, bottom: 0 }}>
@@ -1741,8 +1781,13 @@ export default function App() {
                       <Line yAxisId="btc" type="monotone" name="Median BTC" dataKey="p50btc" stroke={C.gold} strokeWidth={1.5} dot={false} strokeDasharray="5 3" opacity={0.8} />
                     </ComposedChart>
                   </ResponsiveContainer>
-                  {mc.medianFailAge && <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.red, padding: "8px 4px 0" }}>
-                    Failed paths run dry around age {mc.medianFailAge}.</div>}
+                  {mc.medianFailAge && <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.red, padding: "8px 4px 0", lineHeight: 1.5 }}>
+                    Across simulations, the failing paths run dry around age {mc.medianFailAge} (median).{" "}
+                    <span style={{ color: C.inkFaint }}>
+                      {rA.lasts
+                        ? `The central projection (no volatility) survives to ${normalize(scen.A).endAge}.`
+                        : `The central projection runs dry at ${rA.depletedAge} — the spread reflects volatility.`}
+                    </span></div>}
                 </div>
               )}
 
@@ -1867,14 +1912,23 @@ export default function App() {
 
             {/* ③ FOREVER STACK */}
             <div className="card fade" style={{ padding: 22, borderLeft: `3px solid ${C.green}` }}>
-              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.green, marginBottom: 14 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: C.green, marginBottom: 10 }}>
                 Forever Stack
               </div>
+              {/* #11: state the income this card is solving for, and whether it's auto */}
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim, marginBottom: 16, lineHeight: 1.5 }}>
+                Solving for <span style={{ color: C.ink, fontWeight: 600 }}>{cur}{p.spend.toLocaleString()}/yr</span> in today's money
+                {autoIncome ? <span style={{ color: C.green }}> · auto-solved from your stack</span> : " · your target retirement income"}.
+              </div>
               <>
-                  <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 18 }}>
+                  <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 10 }}>
                     <Stat label="Required BTC" big={fmtBtc(fvrA.reqBtc)} sub={`to survive to age ${normalize(scen.A).endAge}`} color={C.orange} />
                     <Stat label="You'll have" big={fmtBtc(fvrA.accBtc)} sub={fvrA.accBtc >= fvrA.reqBtc ? "surplus ✓" : "short of target"} color={fvrA.accBtc >= fvrA.reqBtc ? C.green : C.red} />
                     <Stat label="Implied real return" big={`${(fvrA.realReturn * 100).toFixed(1)}%/yr`} sub="BTC CAGR − inflation" color={C.gold} />
+                  </div>
+                  {/* #20: clarify "You'll have" is the deterministic projected stack, not the MC median */}
+                  <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginBottom: 18, lineHeight: 1.5 }}>
+                    “You'll have” is your projected stack at age {normalize(scen.A).retireAge} on the central price path (same as “Stack at retirement” above). The Monte-Carlo median balance can differ — it's the midpoint of many volatile paths.
                   </div>
                   {fvrA.neededDCA && (
                     <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim, marginBottom: 18, padding: "10px 12px", background: C.panel2, borderRadius: 8 }}>
@@ -1882,8 +1936,12 @@ export default function App() {
                     </div>
                   )}
                   {!compare ? (
+                    <>
+                    <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: C.inkDim, marginBottom: 6 }}>
+                      BTC needed vs. BTC accumulated, by retirement age
+                    </div>
                     <ResponsiveContainer width="100%" height={200}>
-                      <ComposedChart data={fvrCurve} margin={{ top: 8, right: 8, bottom: 0, left: -10 }}>
+                      <ComposedChart data={fvrCurve} margin={{ top: 8, right: 8, bottom: 4, left: 0 }}>
                         <defs>
                           <linearGradient id="grnFill" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor={C.green} stopOpacity={0.25} />
@@ -1891,19 +1949,51 @@ export default function App() {
                           </linearGradient>
                         </defs>
                         <CartesianGrid stroke={C.line} vertical={false} />
-                        <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} />
-                        <YAxis stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false}
-                          tickFormatter={v => v >= 1 ? `${v.toFixed(0)}` : v >= 0.01 ? v.toFixed(2) : v.toFixed(3)} />
+                        <XAxis dataKey="age" stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false}
+                          label={{ value: "Retirement age", position: "insideBottom", offset: -2, fill: C.inkFaint, fontSize: 10, fontFamily: "IBM Plex Mono" }} />
+                        <YAxis stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} width={40}
+                          tickFormatter={v => v >= 1 ? `₿${v.toFixed(0)}` : v >= 0.01 ? `₿${v.toFixed(2)}` : `₿${v.toFixed(3)}`}
+                          label={{ value: "BTC (₿)", angle: -90, position: "insideLeft", fill: C.inkFaint, fontSize: 10, fontFamily: "IBM Plex Mono", style: { textAnchor: "middle" } }} />
                         <Tooltip
                           contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12, fontFamily: "IBM Plex Mono" }}
                           labelFormatter={l => `Age ${l}`}
                           formatter={(v, name) => [fmtBtc(v), name]}
                         />
-                        <Area type="monotone" dataKey="accBtc" name="Stack" fill="url(#grnFill)" stroke={C.green} strokeWidth={2} dot={false} />
-                        <Line type="monotone" dataKey="reqBtc" name="Need" stroke={C.orange} strokeWidth={1.5} strokeDasharray="5 3" dot={false} connectNulls={false} />
-                        <ReferenceLine x={p.retireAge} stroke={C.gold} strokeDasharray="3 3" label={{ value: `${p.retireAge}`, position: "insideTopRight", fill: C.gold, fontSize: 10, fontFamily: "IBM Plex Mono" }} />
+                        <Area type="monotone" dataKey="accBtc" name="Projected stack" fill="url(#grnFill)" stroke={C.green} strokeWidth={2} dot={false} />
+                        <Line type="monotone" dataKey="reqBtc" name="Required to last" stroke={C.orange} strokeWidth={1.5} strokeDasharray="5 3" dot={false} connectNulls={false} />
+                        <ReferenceLine x={p.retireAge} stroke={C.gold} strokeDasharray="3 3" label={{ value: `retire ${p.retireAge}`, position: "insideTopRight", fill: C.gold, fontSize: 10, fontFamily: "IBM Plex Mono" }} />
                       </ComposedChart>
                     </ResponsiveContainer>
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", padding: "6px 4px 0",
+                      fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkDim }}>
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 14, height: 0, borderTop: `2px solid ${C.green}` }} />Projected stack (you'll have)</span>
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 14, height: 0, borderTop: `2px dashed ${C.orange}` }} />Required to last to {normalize(scen.A).endAge}</span>
+                    </div>
+                    {/* #11: how the feasible retirement age shifts with target income */}
+                    <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+                      <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: C.inkDim, marginBottom: 6 }}>
+                        Income → earliest forever-feasible retirement
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+                        <div style={{ display: "contents", fontFamily: "'IBM Plex Mono',monospace" }}>
+                          <span style={{ fontSize: 10, color: C.inkFaint, padding: "4px 0", textTransform: "uppercase", letterSpacing: ".1em" }}>Income / yr</span>
+                          <span style={{ fontSize: 10, color: C.inkFaint, padding: "4px 0", textAlign: "right", textTransform: "uppercase", letterSpacing: ".1em" }}>Retire by</span>
+                        </div>
+                        {foreverTable.map((r, i) => (
+                          <div key={i} style={{ display: "contents" }}>
+                            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "6px 0", borderTop: `1px solid ${C.line}`,
+                              color: r.current ? C.green : C.ink }}>
+                              {cur}{r.income.toLocaleString()}{r.current ? " ←" : ""}
+                            </span>
+                            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, padding: "6px 0", borderTop: `1px solid ${C.line}`, textAlign: "right",
+                              color: r.age == null ? C.red : r.current ? C.green : C.gold }}>
+                              {r.age != null ? `age ${r.age}` : `not by ${Math.min(scen.A.endAge - 1, 90)}`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    </>
                   ) : fvrB && fvrB.possible ? (
                     <>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 4 }}>
