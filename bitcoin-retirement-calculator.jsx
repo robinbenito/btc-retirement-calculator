@@ -729,7 +729,7 @@ function TTvalue({ active, payload, sym, real, compare }) {
   if (!active || !payload || !payload.length) return null;
   const d = payload[0].payload;
   if (!compare) return ttBox(d.age, <>
-    <div style={{ color: C.orange }}>{fmtMoney(real ? d.valueReal : d.value, sym)}{real ? " · today's $" : ""}</div>
+    <div style={{ color: C.orange }}>{fmtMoney(real ? d.valueReal : d.value, sym)}{real ? ` · today's ${sym}` : ""}</div>
     <div style={{ color: C.inkDim }}>{fmtBtc(d.btc)} · {fmtSats(d.sats)}</div>
     {d.price != null && <div style={{ color: C.blue, marginTop: 2 }}>BTC {fmtMoney(d.price, sym)}</div>}
   </>);
@@ -827,7 +827,7 @@ function PinTable({ row, view, real, sym }) {
         <R2 label="Balance" a={fmtSats(row.aS)} b={fmtSats(row.bS)} />
         <R2 label="Value" a={fmtMoney(real ? row.aVR : row.aV, sym)} b={fmtMoney(real ? row.bVR : row.bV, sym)} />
         <R2 label="Flow / yr" a={row.aFlowSats != null ? fmtSats(row.aFlowSats) : "—"} b={row.bFlowSats != null ? fmtSats(row.bFlowSats) : "—"} />
-        <R2 label={`Cash / yr · ${real ? "today's $" : "nominal"}`}
+        <R2 label={`Cash / yr · ${real ? `today's ${sym}` : "nominal"}`}
           a={(real ? row.aCashReal : row.aCash) != null ? fmtMoney(real ? row.aCashReal : row.aCash, sym) : "—"}
           b={(real ? row.bCashReal : row.bCash) != null ? fmtMoney(real ? row.bCashReal : row.bCash, sym) : "—"} />
       </div>
@@ -845,9 +845,9 @@ function PinTable({ row, view, real, sym }) {
     <div style={{ marginTop: 8 }}>
       <div style={{ padding: "8px 4px 4px" }}><span style={lab}>{isMc ? "median at age " : "at age "}{row.age}</span></div>
       <R label="Balance"><span style={{ color: C.orange }}>{fmtSats(balance)}</span></R>
-      <R label="Value"><span style={{ color: C.gold }}>{fmtMoney(value, sym)}</span> <span style={note}>{isMc ? "median · today's $" : real ? "today's $" : "nominal"}</span></R>
+      <R label="Value"><span style={{ color: C.gold }}>{fmtMoney(value, sym)}</span> <span style={note}>{isMc ? `median · today's ${sym}` : real ? `today's ${sym}` : "nominal"}</span></R>
       <R label={sell ? "Selling / yr" : "Buying / yr"}><span style={{ color: sell ? C.red : C.green }}>{row.flowSatsYr != null ? fmtSats(row.flowSatsYr) : "—"}</span></R>
-      <R label={sell ? "Income / yr" : "Contributions / yr"}>{cash != null ? fmtMoney(cash, sym) : "—"} <span style={note}>{showReal ? "today's $" : "nominal"}</span></R>
+      <R label={sell ? "Income / yr" : "Contributions / yr"}>{cash != null ? fmtMoney(cash, sym) : "—"} <span style={note}>{showReal ? `today's ${sym}` : "nominal"}</span></R>
     </div>
   );
 }
@@ -1258,6 +1258,9 @@ export default function App() {
   const goalResult = useMemo(() => tab === "savings" ? calcSavings(goalWithInfl, sharedModel) : null, [goalWithInfl, sharedModel, tab]);
 
   const curLocalSpot = scen[active].spot;
+  // the actual live price in local currency (distinct from the model's spot, which the user can edit) (#25)
+  const liveLocal = live.status === "ok" && live.prices ? localSpotFrom(live.prices, country) : null;
+  const modelOutOfSync = liveLocal != null && Math.round(liveLocal) !== Math.round(curLocalSpot);
   const curUSDSpot = live.status === "ok" ? live.usd : curLocalSpot / (scen[active].fxRate ?? 1);
   const posRatio = curUSDSpot / fvToday;            // curve position always in USD
 
@@ -1288,9 +1291,16 @@ export default function App() {
     if (compare && isPLB) nowR.bLine = curveN(nowYear, scen.B.exp);
     rows.push(nowR);
     rows.sort((a, b) => a.year - b.year);
-    minV = Math.max(0.5, minV);
-    const lo = Math.pow(10, Math.floor(Math.log10(minV)));
-    const hi = Math.pow(10, Math.ceil(Math.log10(maxV)));
+    // the power-law fit is computed in USD (USD price history); convert to the active currency so the
+    // axis matches the rest of the app instead of always reading in $ (#22)
+    const fx = scen.A.fxRate ?? 1;
+    const keys = ["n4", "n5", "n6", "aLine", "bLine", "hist"];
+    if (fx !== 1) rows.forEach(r => keys.forEach(k => { if (r[k] != null) r[k] *= fx; }));
+    let mn = Infinity, mx = 0;
+    rows.forEach(r => keys.forEach(k => { if (r[k] != null && isFinite(r[k])) { mn = Math.min(mn, r[k]); mx = Math.max(mx, r[k]); } }));
+    mn = Math.max(0.5, mn);
+    const lo = Math.pow(10, Math.floor(Math.log10(mn)));
+    const hi = Math.pow(10, Math.ceil(Math.log10(mx)));
     const ticks = []; for (let t = lo; t <= hi; t *= 10) ticks.push(t);
     return { rows, lo, hi, ticks, endYear, expA: scen.A.exp };
   }, [scen.A, scen.B, compare, live]);
@@ -1355,20 +1365,25 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: "4px 10px", flexWrap: "wrap",
               padding: "7px 12px", background: "rgba(255,255,255,.03)", borderRadius: 8,
               fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: C.inkDim }}>
-              <span style={{ color: live.status === "ok" ? C.green : C.inkDim }}>●</span>
+              <span title={live.status === "ok" ? `Live price · ${live.src || "exchange"}` : "Price feed offline"}
+                style={{ color: live.status === "ok" ? C.green : C.inkDim }}>●</span>
               <span style={{ color: C.ink, fontWeight: 600 }}>
-                {live.status === "ok" ? `${cur}${Math.round(curLocalSpot).toLocaleString()}` : "—"}
+                {live.status === "ok" && liveLocal ? `${cur}${Math.round(liveLocal).toLocaleString()}` : "—"}
               </span>
               <span>· fair {cur}{Math.round(fvToday * (scen[active].fxRate ?? 1)).toLocaleString()}</span>
               <span style={{ color: posRatio > 1.2 ? C.red : posRatio > 0.8 ? C.gold : C.green }}>
                 · {Math.round(posRatio * 100)}%
               </span>
-              <button className="seg" onClick={() => fetchLive()} style={{ fontSize: 11, padding: "2px 8px" }}>↻</button>
-              {live.status === "ok" && (
-                <button className="seg" onClick={() => {
-                  const spot = curLocalSpot;
-                  setScen(s => ({ ...s, A: { ...s.A, spot }, B: { ...s.B, spot } }));
-                }} style={{ fontSize: 11, padding: "2px 8px" }}>Apply</button>
+              {live.status === "ok" && live.ts && (
+                <span style={{ color: C.inkFaint }}>· as of {new Date(live.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+              )}
+              <button className="seg" title="Refresh live price" onClick={() => fetchLive()} style={{ fontSize: 11, padding: "2px 8px" }}>↻</button>
+              {modelOutOfSync && (
+                <button className="seg" title={`The model uses ${cur}${Math.round(curLocalSpot).toLocaleString()} — click to use the live price`}
+                  onClick={() => {
+                    const spot = Math.round(liveLocal);
+                    setScen(s => ({ ...s, A: { ...s.A, spot }, B: { ...s.B, spot } }));
+                  }} style={{ fontSize: 11, padding: "2px 8px", color: C.orange }}>Use live ↑</button>
               )}
             </div>
             <div ref={countryRef} style={{ position: "relative" }}>
@@ -1492,9 +1507,9 @@ export default function App() {
                 ))}
               </div>
             </Field>
-            <button onClick={() => setShowAdv(s => !s)} style={{ background: "none", border: "none", color: C.inkDim, cursor: "pointer",
+            <button onClick={() => setShowAdv(s => !s)} style={{ display: "block", background: "none", border: "none", color: C.inkDim, cursor: "pointer",
               fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, letterSpacing: ".08em", padding: "4px 0", marginTop: 4 }}>
-              {showAdv ? "− Hide" : "⚙ Advanced"}</button>
+              {showAdv ? "− Hide advanced" : "⚙ Advanced settings"}</button>
             {showAdv && (
               <div className="fade" style={{ marginTop: 14 }}>
                 {isPL ? (
@@ -1517,9 +1532,9 @@ export default function App() {
                         <XAxis dataKey="year" type="number" domain={[2011, lens.endYear]} allowDecimals={false}
                           stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} tickFormatter={(v) => `'${String(Math.round(v)).slice(2)}`} />
                         <YAxis scale="log" domain={[lens.lo, lens.hi]} ticks={lens.ticks} allowDataOverflow
-                          stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} width={42}
-                          tickFormatter={(v) => (v < 1000 ? `$${v}` : fmtMoney(v, "$"))} />
-                        <Tooltip content={<TTg fmt={(v) => fmtMoney(v, "$")} labelKey="year" />} />
+                          stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} width={46}
+                          tickFormatter={(v) => (v < 1000 ? `${cur}${v}` : fmtMoney(v, cur))} />
+                        <Tooltip content={<TTg fmt={(v) => fmtMoney(v, cur)} labelKey="year" />} />
                         <ReferenceLine x={nowYear} stroke={C.gold} strokeDasharray="3 3"
                           label={{ value: "now", fill: C.gold, fontSize: 10, position: "insideTopRight" }} />
                         <Line type="monotone" name="n=4" dataKey="n4" stroke={C.inkFaint} strokeWidth={1} dot={false} strokeDasharray="4 4" connectNulls />
@@ -1563,9 +1578,10 @@ export default function App() {
             )}
 
             {/* SAVED SCENARIOS */}
-            <button onClick={() => setShowSaved(s => !s)} style={{ background: "none", border: "none", color: C.inkDim, cursor: "pointer",
-              fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, letterSpacing: ".08em", padding: "4px 0", marginTop: 16 }}>
-              {showSaved ? "− Hide" : "+ Saved"} scenarios{saved.length ? ` (${saved.length})` : ""}</button>
+            <button onClick={() => setShowSaved(s => !s)} style={{ display: "block", width: "100%", textAlign: "left",
+              background: "none", border: "none", borderTop: `1px solid ${C.line}`, color: C.inkDim, cursor: "pointer",
+              fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 12, letterSpacing: ".08em", padding: "12px 0 4px", marginTop: 14 }}>
+              {showSaved ? "− Hide saved scenarios" : "+ Saved scenarios"}{saved.length ? ` (${saved.length})` : ""}</button>
             {showSaved && (
               <div className="fade" style={{ marginTop: 12 }}>
                 <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
@@ -1683,11 +1699,11 @@ export default function App() {
                 {!mc ? (
                   <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
                     <button className={`seg ${!real ? "on" : ""}`} onClick={() => setReal(false)}>Nominal</button>
-                    <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>Today's $</button>
+                    <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>{`Today's ${cur}`}</button>
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 10, alignItems: "center", fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkDim }}>
-                    <span>volatility · {mc.nPaths} paths · {mc.compare ? "A vs B median" : "today's $"}</span>
+                    <span>volatility · {mc.nPaths} paths · {mc.compare ? "A vs B median" : `today's ${cur}`}</span>
                     {compare && !mc.compare && <span style={{ color: mc.scen === "A" ? C.orange : C.blue, display: "flex", gap: 6, alignItems: "center" }}>
                       <Dot c={mc.scen === "A" ? C.orange : C.blue} /> {mc.scen}</span>}
                   </div>
@@ -1795,10 +1811,10 @@ export default function App() {
                       color={mc.successRate >= 0.8 ? C.green : mc.successRate >= 0.5 ? C.gold : C.red}
                       sub={`of ${mc.nPaths} paths`} />
                     <Stat label={`Median at age ${normalize(scen[mc.scen]).retireAge}`} big={fmtMoney(mc.medianRet, cur)}
-                      sub="today's $ · at retirement" color={C.gold} />
+                      sub={`today's ${cur} · at retirement`} color={C.gold} />
                     <Stat label={`Median at age ${normalize(scen[mc.scen]).endAge}`} big={fmtMoney(mc.medianTerminal, cur)}
-                      sub={mc.medianTerminal > 0 ? "today's $ · what's left"
-                        : mc.medianFailAge ? `depleted — most run dry ~age ${mc.medianFailAge}` : "today's $"}
+                      sub={mc.medianTerminal > 0 ? `today's ${cur} · what's left`
+                        : mc.medianFailAge ? `depleted — most run dry ~age ${mc.medianFailAge}` : `today's ${cur}`}
                       color={mc.medianTerminal > 0 ? C.gold : C.red} />
                   </div>
                   <ResponsiveContainer width="100%" height={240}>
@@ -2333,7 +2349,7 @@ export default function App() {
                           </div>
                           <div style={{ display: "flex", gap: 4 }}>
                             <button className={`seg ${!real ? "on" : ""}`} onClick={() => setReal(false)}>Nominal</button>
-                            <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>Today's $</button>
+                            <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>{`Today's ${cur}`}</button>
                           </div>
                         </div>
                         <ResponsiveContainer width="100%" height={280}>
@@ -2375,12 +2391,28 @@ export default function App() {
 
         <footer style={{ marginTop: 30, paddingTop: 18, borderTop: `1px solid ${C.line}`,
           color: C.inkFaint, fontSize: 12, lineHeight: 1.6, maxWidth: 760 }}>
+          {/* #10: support / source badges */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+            <a href="https://github.com/robinbenito/btc-retirement-calculator" target="_blank" rel="noopener noreferrer">
+              <img alt="GitHub repository"
+                src="https://img.shields.io/badge/GitHub-Source-181717?logo=github&logoColor=white&style=social" />
+            </a>
+            <a href="https://www.buymeacoffee.com/rgaston" target="_blank" rel="noopener noreferrer">
+              <img alt="Buy Me a Coffee"
+                src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black&style=social" />
+            </a>
+            <a href="https://buymeabitcoffee.vercel.app/btc/bc1p6nrgd38nmx09lm2j8ql8wg58nlfsmsh2zxyapss7ljxxvj636c0swhuqdm?identifier=Buy+Me+a+BitCoffee&lightning=civicdrone297%40walletofsatoshi.com"
+              target="_blank" rel="noopener noreferrer">
+              <img alt="Buy Me a BitCoffee"
+                src="https://img.shields.io/badge/Buy%20Me%20a%20BitCoffee-f7931a?logo=bitcoin&logoColor=black&color=f7931a&style=social&label=Useful%3F" />
+            </a>
+          </div>
           <strong style={{ color: C.inkDim }}>Not financial advice.</strong> The power-law option extrapolates
           BTC's historical price-vs-time trend (price ∝ daysⁿ) forward from today's spot — a thesis, not a fact.
           The Monte Carlo wraps that trend in random, mean-reverting volatility that decays as you set it; it's a
           model of one possible volatility future, not a prediction, and real bear markets can stay down far longer
           than the mean reversion assumes. Nothing here accounts for taxes, fees, or your actual risk tolerance.
-          Treat every number as a sketch of one assumption. I'm not a financial adviser.
+          Treat every number as a sketch of one assumption.
         </footer>
       </div>
     </div>
