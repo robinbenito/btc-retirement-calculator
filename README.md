@@ -29,6 +29,19 @@ A personal finance tool for planning retirement around a Bitcoin stack. Models a
 ### Other tabs
 - **My Inflation** — live CPI for every supported country (World Bank, back to 2010) with a movable averaging window (default 5-year); euro-area users pick their exact country (Eurostat per-COICOP basket) and weight their own spending mix. Falls back to embedded Destatis data when offline.
 - **Savings Goal** — reach a target fiat value (e.g. a house) via BTC appreciation + DCA, with real/nominal toggle and clipped chart window
+- **Mining** — grow a BTC stack via **hosted** (own the rig: capex, electricity, hosting, pool fees, lifetime + refresh) or **rented** hashrate. Projects BTC mined, fiat value, breakeven, and ROI over a configurable horizon, with a nominal/real toggle.
+
+### Mining model
+Mining yield depends on future network difficulty, so the open question is how to project it. Instead of fitting a second model, the network hashrate is **coupled to the price power law**:
+
+| Quantity | Relationship |
+|---|---|
+| Network hashrate | `H(t) = H₀ × (price(t) / spot)^α`, with `α ≈ 2` (empirically hashrate ∝ price²; miners deploy capacity in proportion to profitability). Tunable via the **α** slider. |
+| Difficulty | Moves with hashrate (`hashrate ≈ difficulty × 2³² / 600`), so projecting one projects both. |
+| Block reward | Halving schedule applied: 3.125 BTC now → 1.5625 in ~Apr 2028 → 0.78125 in ~2032, … |
+| Your daily BTC | `(yourHashrate / H(t)) × 144 × subsidy × (1 + txFeeBoost) × (1 − poolFee)` |
+
+Running costs can be **paid from pocket** (keep all mined BTC, the default — mine cheap, hold for appreciation) or **funded by selling** mined BTC. Anchors (network hashrate ≈960 EH/s, difficulty ≈125 T, subsidy 3.125 BTC) are calibrated to **June 2026** and meant to be refreshed; the coupling exponent and ASIC cost/efficiency curve (`NET_HASH_NOW`, `HASH_ALPHA_DEFAULT`, `ASIC_DECLINE`) are the main knobs to update as better data arrives. Sources: [Hashrate Index](https://hashrateindex.com/blog/difficulty-forecasting-101-for-bitcoin-miners-hosters-lenders-and-hashrate-traders/), [Power Law theory (Fulgur Ventures)](https://medium.com/@fulgur.ventures/bitcoin-power-law-theory-executive-summary-report-837e6f00347e).
 
 ### Localization
 - Country/currency auto-detected by IP on first load (manual picks always win); the detected region is flagged in the picker.

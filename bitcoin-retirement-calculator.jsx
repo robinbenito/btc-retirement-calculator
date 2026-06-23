@@ -234,6 +234,90 @@ const modelOf = (p) =>
     ? { type: "cagr", cagr: p.cagr, spot: p.spot, tau: p.tau ?? 2 }
     : { type: "pl", exp: p.exp, tau: p.tau ?? 2, gap: p.gap ?? 1, spot: p.spot, fxRate: p.fxRate ?? 1 };
 
+/* ── Mining model ───────────────────────────────────────────────
+   Network hashrate is COUPLED to the price power law: empirically hashrate ∝ price^α
+   (α≈2), because miners deploy capacity in proportion to profitability. So we never fit a
+   second model — we read future price from priceAt() and raise it to α. Difficulty and
+   hashrate move together (network_hashrate ≈ difficulty × 2³² / 600), so this projects both.
+   Anchors are June 2026; refresh them as the network grows. */
+const NET_HASH_NOW = 960e18;        // H/s ≈ 960 EH/s (Jun 2026)
+const SUBSIDY_NOW = 3.125;          // BTC per block (post-Apr-2024 halving)
+const LAST_HALVING_YEAR = 2024.29;  // ≈ Apr 2024
+const HALVING_YEARS = 4;            // ~210,000 blocks ≈ 4 years
+const HASH_ALPHA_DEFAULT = 2;       // hashrate ∝ price^α
+const ASIC_DECLINE = 0.18;          // ASIC $/TH falls ~18%/yr (efficiency gains) — used on hardware refresh
+
+/* block subsidy at a future point, honouring the halving schedule */
+function subsidyAt(yearsOut) {
+  const year = nowYear + yearsOut;
+  const halvings = Math.max(0, Math.floor((year - LAST_HALVING_YEAR) / HALVING_YEARS));
+  return SUBSIDY_NOW / Math.pow(2, halvings);
+}
+/* projected network hashrate (H/s), coupled to the price model */
+function netHashAt(yearsOut, model, alpha) {
+  return NET_HASH_NOW * Math.pow(priceAt(yearsOut, model) / model.spot, alpha);
+}
+
+/* month-by-month mining projection. Hosted = own the rig (capex + electricity + hosting);
+   Rented = pay a daily rate for hashrate. opexFunding "sell" covers running costs by selling
+   mined BTC (accruing the rest); "fiat" pays costs out of pocket and keeps all mined BTC.
+   Returns BTC accumulated (gross/net), fiat value, cumulative outlay, breakeven & ROI. */
+function simulateMining(p) {
+  const { mode, ths, capexPerTh, wPerTh, elecPrice, hostFeePerThDay, poolFeePct, rigLifeYears,
+    refresh, rentPerThDay, termYears, feeBoost, alpha, opexFunding, horizon, model, infl } = p;
+  const myHs = ths * 1e12;                       // TH/s → H/s
+  const poolKeep = 1 - poolFeePct / 100;
+  const feeMult = 1 + feeBoost / 100;            // tx fees as a fraction of subsidy
+  const dPerMo = 365.25 / 12;
+  const months = Math.max(1, Math.round(horizon * 12));
+  const aliveMonths = mode === "rented"
+    ? Math.min(termYears, horizon) * 12
+    : (refresh ? months : Math.min(rigLifeYears, horizon) * 12);
+
+  const capex0 = mode === "hosted" ? capexPerTh * ths : 0;
+  let fiatOutlay = capex0;     // capex + (opex when paid in fiat) — the money you put in
+  let btcGross = 0, btcNet = 0;
+  let nextRefresh = mode === "hosted" && refresh ? rigLifeYears * 12 : Infinity;
+  let breakevenY = null;
+  const rows = [{ year: 0, btcGross: 0, btcNet: 0, value: 0, valueReal: 0, cost: capex0 }];
+
+  for (let m = 1; m <= months; m++) {
+    const y = m / 12;
+    const price = priceAt(y, model);             // local currency
+    const active = m <= aliveMonths;
+
+    if (active) {
+      const netHs = netHashAt(y, model, alpha);
+      const mined = (myHs / netHs) * 144 * subsidyAt(y) * feeMult * poolKeep * dPerMo;
+      btcGross += mined;
+
+      const opex = mode === "hosted"
+        ? (ths * wPerTh * 24 / 1000 * elecPrice + hostFeePerThDay * ths) * dPerMo  // power + hosting
+        : rentPerThDay * ths * dPerMo;                                              // rental
+      if (opexFunding === "sell") { btcNet += mined - opex / price; }               // sell output to cover costs
+      else { btcNet += mined; fiatOutlay += opex; }                                 // pay costs from pocket
+    }
+    // hardware refresh: re-buy the rig at a (declining) ASIC price
+    if (m === nextRefresh && m < months) {
+      fiatOutlay += capexPerTh * Math.pow(1 - ASIC_DECLINE, y) * ths;
+      nextRefresh += rigLifeYears * 12;
+    }
+    if (breakevenY === null && fiatOutlay > 0 && btcNet * price >= fiatOutlay) breakevenY = y;
+
+    if (m % 12 === 0 || m === months) {
+      rows.push({ year: y, btcGross, btcNet,
+        value: btcNet * price, valueReal: (btcNet * price) / Math.pow(1 + infl, y), cost: fiatOutlay });
+    }
+  }
+  const endPrice = priceAt(horizon, model);
+  const valueEnd = btcNet * endPrice;
+  return {
+    rows, totalBtcGross: btcGross, totalBtcNet: btcNet, totalOutlay: fiatOutlay,
+    valueNow: btcNet * model.spot, valueEnd, valueEndReal: valueEnd / Math.pow(1 + infl, horizon),
+    breakevenY, roi: fiatOutlay > 0 ? (valueEnd - fiatOutlay) / fiatOutlay : null,
+  };
+}
+
 /* full accumulation → drawdown projection with optional crash shock */
 function simulate(p) {
   const { age, retireAge, endAge, btc, monthly, spend, infl, model, shock } = p;
@@ -712,6 +796,20 @@ function TTvalue({ active, payload, sym, real, compare }) {
     {d.aPrice != null && <div style={{ color: C.inkDim, marginTop: 2, fontSize: 11 }}>BTC {fmtMoney(d.aPrice, sym)}</div>}
   </>);
 }
+// Mining chart tooltip — net BTC, stack value, and fiat invested at a given projection year.
+function MineTT({ active, payload, real, cur }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px",
+      fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
+      <div style={{ color: C.gold, marginBottom: 4 }}>Year {Math.round(d.year)}</div>
+      <div style={{ color: C.orange }}>{fmtBtc(d.btcNet)} net{d.btcGross != null ? ` · ${fmtBtc(d.btcGross)} gross` : ""}</div>
+      <div style={{ color: C.gold }}>{fmtMoney(real ? d.valueReal : d.value, cur)}{real ? ` · today's ${cur}` : ""}</div>
+      <div style={{ color: C.inkDim, marginTop: 2 }}>invested {fmtMoney(d.cost, cur)}</div>
+    </div>
+  );
+}
 // Shared age / value / BTC axes for the portfolio + Monte-Carlo charts. Returns an array (not a
 // fragment) so recharts' React.Children walk flattens and detects each axis.
 const ageValBtcAxes = (cur) => [
@@ -904,6 +1002,15 @@ export default function App() {
   /* ── Savings goal state ── */
   const [goal, setGoal] = useState({ name:"Dream Car", category:"car", valueToday:50000, goalInfl:0.045, age:34, currentBtc:0.5, monthly:400 });
   const upGoal = (k, v) => setGoal(s => ({ ...s, [k]: v }));
+
+  /* ── Mining state (price model shared from Retirement scenario A) ── */
+  const [mine, setMine] = useState({
+    mode: "hosted", ths: 100, capexPerTh: 15, wPerTh: 18, elecPrice: 0.06,
+    hostFeePerThDay: 0, poolFeePct: 1.5, rigLifeYears: 4, refresh: true,
+    rentPerThDay: 0.05, termYears: 4, feeBoost: 3, alpha: HASH_ALPHA_DEFAULT,
+    opexFunding: "fiat", horizon: 10,
+  });
+  const upMine = (k, v) => setMine(s => ({ ...s, [k]: v }));
 
   const p = scen[active];
   const up = (k, v) => setScen(s => ({ ...s, [active]: { ...s[active], [k]: v } }));
@@ -1224,6 +1331,9 @@ export default function App() {
   /* ── Savings goal ── */
   const goalWithInfl = useMemo(() => ({ ...goal, infl: scen.A.infl }), [goal, scen.A.infl]);
   const goalResult = useMemo(() => tab === "savings" ? calcSavings(goalWithInfl, sharedModel) : null, [goalWithInfl, sharedModel, tab]);
+  const mineResult = useMemo(() => tab === "mining"
+    ? simulateMining({ ...mine, model: sharedModel, infl: scen.A.infl })
+    : null, [mine, sharedModel, scen.A.infl, tab]);
 
   const curLocalSpot = scen[active].spot;
   // the actual live price in local currency (distinct from the model's spot, which the user can edit) (#25)
@@ -1379,7 +1489,7 @@ export default function App() {
 
         {/* ── Tab bar ── */}
         <div style={{ display: "flex", gap: 6, marginBottom: 26, flexWrap: "wrap" }}>
-          {[["inflation","My Inflation"],["retirement","Retirement"],["savings","Savings Goal"]].map(([k, label]) => (
+          {[["inflation","My Inflation"],["retirement","Retirement"],["savings","Savings Goal"],["mining","Mining"]].map(([k, label]) => (
             <button key={k} className={`seg ${tab === k ? "on" : ""}`} style={{ padding: "9px 18px" }} onClick={() => setTab(k)}>{label}</button>
           ))}
         </div>
@@ -2344,6 +2454,127 @@ export default function App() {
                       </div>
                     );
                   })()}
+                </>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === "mining" && (
+          <div className="grid-wrap fade" style={{ display: "grid", gap: 22, gridTemplateColumns: "minmax(0,340px) minmax(0,1fr)" }}>
+            {/* ── INPUTS ── */}
+            <section className="card" style={{ padding: 22, alignSelf: "start" }}>
+              <Field label="Mining setup">
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className={`seg ${mine.mode === "hosted" ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("mode", "hosted")}>Hosted rig</button>
+                  <button className={`seg ${mine.mode === "rented" ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("mode", "rented")}>Rented hashrate</button>
+                </div>
+              </Field>
+              <Field label="Your hashrate" suffix="TH/s"><NumIn value={mine.ths} onChange={v => upMine("ths", v)} step={10} /></Field>
+
+              {mine.mode === "hosted" ? (
+                <>
+                  <Field label="Hardware cost" suffix="per TH/s"><NumIn value={mine.capexPerTh} onChange={v => upMine("capexPerTh", v)} prefix={cur} step={1} /></Field>
+                  <Field label="Efficiency" suffix="watts per TH/s"><NumIn value={mine.wPerTh} onChange={v => upMine("wPerTh", v)} step={1} /></Field>
+                  <Field label="Electricity price" suffix="per kWh"><NumIn value={mine.elecPrice} onChange={v => upMine("elecPrice", v)} prefix={cur} step={0.01} /></Field>
+                  <Field label="Hosting fee" suffix="per TH/s / day (extra)"><NumIn value={mine.hostFeePerThDay} onChange={v => upMine("hostFeePerThDay", v)} prefix={cur} step={0.005} /></Field>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <div style={{ flex: 1 }}><Field label="Rig lifetime" suffix="yrs"><NumIn value={mine.rigLifeYears} onChange={v => upMine("rigLifeYears", v)} step={1} /></Field></div>
+                    <div style={{ flex: 1.3 }}><Field label="At end of life">
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button className={`seg ${mine.refresh ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("refresh", true)}>Replace</button>
+                        <button className={`seg ${!mine.refresh ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("refresh", false)}>Retire</button>
+                      </div>
+                    </Field></div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Field label="Rental rate" suffix="per TH/s / day"><NumIn value={mine.rentPerThDay} onChange={v => upMine("rentPerThDay", v)} prefix={cur} step={0.005} /></Field>
+                  <Field label="Contract length" suffix="yrs"><NumIn value={mine.termYears} onChange={v => upMine("termYears", v)} step={1} /></Field>
+                </>
+              )}
+
+              <Field label="Pool fee"><Slider value={mine.poolFeePct} onChange={v => upMine("poolFeePct", v)} min={0} max={5} step={0.1} fmt={v => `${v.toFixed(1)}%`} /></Field>
+              <div style={{ height: 1, background: C.line, margin: "6px 0 18px" }} />
+
+              <Field label="Running costs" suffix={mine.opexFunding === "fiat" ? "keep all mined BTC" : "self-funding"}>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className={`seg ${mine.opexFunding === "fiat" ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("opexFunding", "fiat")}>Pay from pocket</button>
+                  <button className={`seg ${mine.opexFunding === "sell" ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("opexFunding", "sell")}>Sell mined BTC</button>
+                </div>
+              </Field>
+              <Field label="Tx-fee boost" suffix="% on top of subsidy"><Slider value={mine.feeBoost} onChange={v => upMine("feeBoost", v)} min={0} max={20} step={0.5} fmt={v => `${v.toFixed(1)}%`} /></Field>
+              <Field label="Hashrate ↔ price coupling" suffix="α  ·  hashrate ∝ priceᵃ"><Slider value={mine.alpha} onChange={v => upMine("alpha", v)} min={0.5} max={3} step={0.1} fmt={v => `α = ${v.toFixed(1)}`} /></Field>
+              <Field label="Projection horizon"><Slider value={mine.horizon} onChange={v => upMine("horizon", v)} min={1} max={20} step={1} fmt={v => `${v} yrs`} /></Field>
+
+              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, lineHeight: 1.5, marginTop: 8 }}>
+                BTC price model: {scen.A.modelType === "cagr" ? `CAGR ${(scen.A.cagr*100).toFixed(0)}%` : `Power law n=${scen.A.exp.toFixed(1)}`} — edit in Retirement tab. Network hashrate is projected from it (≈{Math.round(NET_HASH_NOW/1e18)} EH/s today).
+              </div>
+            </section>
+
+            {/* ── RESULTS ── */}
+            <section style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+              {mineResult && (
+                <>
+                  <div className="card fade" style={{ padding: 22 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
+                      <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim }}>
+                        {mine.horizon}-year mining outlook
+                      </div>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button className={`seg ${!real ? "on" : ""}`} onClick={() => setReal(false)}>Nominal</button>
+                        <button className={`seg ${real ? "on" : ""}`} onClick={() => setReal(true)}>{`Today's ${cur}`}</button>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                      <Stat label="BTC mined (net)" big={fmtBtc(mineResult.totalBtcNet)} sub={`${fmtBtc(mineResult.totalBtcGross)} before costs`} color={C.orange} />
+                      <Stat label={`Value at year ${mine.horizon}`} big={fmtMoney(real ? mineResult.valueEndReal : mineResult.valueEnd, cur)} sub={real ? "today's money" : "nominal"} color={C.gold} />
+                      <Stat label="Total invested" big={fmtMoney(mineResult.totalOutlay, cur)} sub={mine.opexFunding === "sell" ? "capex (costs paid from output)" : "capex + running costs"} color={C.ink} />
+                      <Stat label="Fiat breakeven"
+                        big={mineResult.breakevenY != null ? `${mineResult.breakevenY.toFixed(1)} yrs` : "—"}
+                        sub={mineResult.breakevenY != null ? "net BTC value ≥ invested" : "not within horizon"}
+                        color={mineResult.breakevenY != null ? C.green : C.red} />
+                      <Stat label="Total ROI"
+                        big={mineResult.roi != null ? `${(mineResult.roi*100).toFixed(0)}%` : "—"}
+                        color={mineResult.roi != null && mineResult.roi >= 0 ? C.green : C.red} />
+                    </div>
+                  </div>
+
+                  <div className="card fade" style={{ padding: "20px 18px 16px" }}>
+                    <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim, marginBottom: 14 }}>
+                      BTC accumulated &amp; value
+                    </div>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <ComposedChart data={mineResult.rows} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="mineVal" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor={C.gold} stopOpacity={0.35} /><stop offset="100%" stopColor={C.gold} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+                        <XAxis dataKey="year" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false}
+                          tickFormatter={v => `Y${v}`} />
+                        <YAxis yAxisId="fiat" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={52} tickFormatter={v => fmtMoney(v, cur)} />
+                        <YAxis yAxisId="btc" orientation="right" stroke={C.inkFaint} tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={v => `₿${v.toFixed(2)}`} />
+                        <Tooltip content={<MineTT real={real} cur={cur} />} />
+                        <Area yAxisId="fiat" type="monotone" dataKey={real ? "valueReal" : "value"} name="Value" stroke={C.gold} strokeWidth={2} fill="url(#mineVal)" />
+                        <Line yAxisId="fiat" type="monotone" dataKey="cost" name="Invested" stroke={C.inkDim} strokeWidth={1.5} dot={false} strokeDasharray="5 3" />
+                        <Line yAxisId="btc" type="monotone" dataKey="btcNet" name="Net BTC" stroke={C.orange} strokeWidth={2} dot={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", padding: "8px 4px 0",
+                      fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkDim }}>
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 14, height: 0, borderTop: `2px solid ${C.orange}` }} />Net BTC (right)</span>
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 14, height: 0, borderTop: `2px solid ${C.gold}` }} />Stack value</span>
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 14, height: 0, borderTop: `2px dashed ${C.inkDim}` }} />Fiat invested</span>
+                    </div>
+                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, lineHeight: 1.5, marginTop: 12 }}>
+                      Difficulty is projected by coupling network hashrate to the price power law (hashrate ∝ priceᵃ, α≈2), with the halving schedule (3.125 → 1.5625 BTC in 2028, …) applied to block rewards. As the network grows, your share — and BTC mined per day — shrinks. Sources:{" "}
+                      <a href="https://hashrateindex.com/blog/difficulty-forecasting-101-for-bitcoin-miners-hosters-lenders-and-hashrate-traders/" target="_blank" rel="noopener noreferrer" style={{ color: C.blue }}>Hashrate Index ↗</a>,{" "}
+                      <a href="https://medium.com/@fulgur.ventures/bitcoin-power-law-theory-executive-summary-report-837e6f00347e" target="_blank" rel="noopener noreferrer" style={{ color: C.blue }}>Power Law theory ↗</a>.
+                    </div>
+                  </div>
                 </>
               )}
             </section>
