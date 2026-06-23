@@ -29,7 +29,7 @@ A personal finance tool for planning retirement around a Bitcoin stack. Models a
 ### Other tabs
 - **My Inflation** — live CPI for every supported country (World Bank, back to 2010) with a movable averaging window (default 5-year); euro-area users pick their exact country (Eurostat per-COICOP basket) and weight their own spending mix. Falls back to embedded Destatis data when offline.
 - **Savings Goal** — reach a target fiat value (e.g. a house) via BTC appreciation + DCA, with real/nominal toggle and clipped chart window
-- **Mining** — grow a BTC stack via **hosted** (own the rig: capex, electricity, hosting, pool fees, lifetime + refresh) or **rented** hashrate. Projects BTC mined, fiat value, breakeven, and ROI over a configurable horizon, with a nominal/real toggle.
+- **Mining** — grow a BTC stack via **hosted** (own the rig) or **rented** hashrate. Inputs are the numbers an operator actually has: pick a **miner model** (Antminer S21/Pro/XP, Whatsminer M60/M66, …) to auto-fill **hashrate (TH/s)** and **power draw (W)**, or enter them manually, then set an **all-in hosting rate ($/kWh)** (power + facility) and total **hardware cost**. Projects BTC mined, fiat value, breakeven, and ROI over a configurable horizon, with a nominal/real toggle. Set hardware cost to 0 for an operational-only view.
 
 ### Mining model
 Mining yield depends on future network difficulty, so the open question is how to project it. Instead of fitting a second model, the network hashrate is **coupled to the price power law**:

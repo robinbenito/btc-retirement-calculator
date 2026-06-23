@@ -246,6 +246,17 @@ const LAST_HALVING_YEAR = 2024.29;  // ≈ Apr 2024
 const HALVING_YEARS = 4;            // ~210,000 blocks ≈ 4 years
 const HASH_ALPHA_DEFAULT = 2;       // hashrate ∝ price^α
 const ASIC_DECLINE = 0.18;          // ASIC $/TH falls ~18%/yr (efficiency gains) — used on hardware refresh
+/* Common ASIC presets — seed the two spec-sheet facts (hashrate + total power draw); the user
+   sets price + hosting rate themselves (street prices vary). custom = manual entry. */
+const ASIC_RIGS = {
+  s19xp:  { short:"S19 XP",  label:"Antminer S19 XP",  ths:141, watts:3032 },
+  s21:    { short:"S21",     label:"Antminer S21",     ths:200, watts:3500 },
+  s21pro: { short:"S21 Pro", label:"Antminer S21 Pro", ths:234, watts:3531 },
+  s21xp:  { short:"S21 XP",  label:"Antminer S21 XP",  ths:270, watts:3645 },
+  m60s:   { short:"M60S",    label:"Whatsminer M60S",  ths:186, watts:3441 },
+  m66s:   { short:"M66S",    label:"Whatsminer M66S",  ths:298, watts:5513 },
+  custom: { short:"Custom",  label:"Custom",           ths:null, watts:null },
+};
 
 /* block subsidy at a future point, honouring the halving schedule */
 function subsidyAt(yearsOut) {
@@ -263,7 +274,7 @@ function netHashAt(yearsOut, model, alpha) {
    mined BTC (accruing the rest); "fiat" pays costs out of pocket and keeps all mined BTC.
    Returns BTC accumulated (gross/net), fiat value, cumulative outlay, breakeven & ROI. */
 function simulateMining(p) {
-  const { mode, ths, capexPerTh, wPerTh, elecPrice, hostFeePerThDay, poolFeePct, rigLifeYears,
+  const { mode, ths, watts, hostRate, capex, poolFeePct, rigLifeYears,
     refresh, rentPerThDay, termYears, feeBoost, alpha, opexFunding, horizon, model, infl } = p;
   const myHs = ths * 1e12;                       // TH/s → H/s
   const poolKeep = 1 - poolFeePct / 100;
@@ -274,7 +285,7 @@ function simulateMining(p) {
     ? Math.min(termYears, horizon) * 12
     : (refresh ? months : Math.min(rigLifeYears, horizon) * 12);
 
-  const capex0 = mode === "hosted" ? capexPerTh * ths : 0;
+  const capex0 = mode === "hosted" ? capex : 0;
   let fiatOutlay = capex0;     // capex + (opex when paid in fiat) — the money you put in
   let btcGross = 0, btcNet = 0;
   let nextRefresh = mode === "hosted" && refresh ? rigLifeYears * 12 : Infinity;
@@ -292,14 +303,14 @@ function simulateMining(p) {
       btcGross += mined;
 
       const opex = mode === "hosted"
-        ? (ths * wPerTh * 24 / 1000 * elecPrice + hostFeePerThDay * ths) * dPerMo  // power + hosting
-        : rentPerThDay * ths * dPerMo;                                              // rental
+        ? (watts / 1000 * 24 * hostRate) * dPerMo   // all-in hosting: kW × hours × $/kWh
+        : rentPerThDay * ths * dPerMo;              // rental
       if (opexFunding === "sell") { btcNet += mined - opex / price; }               // sell output to cover costs
       else { btcNet += mined; fiatOutlay += opex; }                                 // pay costs from pocket
     }
     // hardware refresh: re-buy the rig at a (declining) ASIC price
     if (m === nextRefresh && m < months) {
-      fiatOutlay += capexPerTh * Math.pow(1 - ASIC_DECLINE, y) * ths;
+      fiatOutlay += capex * Math.pow(1 - ASIC_DECLINE, y);
       nextRefresh += rigLifeYears * 12;
     }
     if (breakevenY === null && fiatOutlay > 0 && btcNet * price >= fiatOutlay) breakevenY = y;
@@ -1005,12 +1016,15 @@ export default function App() {
 
   /* ── Mining state (price model shared from Retirement scenario A) ── */
   const [mine, setMine] = useState({
-    mode: "hosted", ths: 100, capexPerTh: 15, wPerTh: 18, elecPrice: 0.06,
-    hostFeePerThDay: 0, poolFeePct: 1.5, rigLifeYears: 4, refresh: true,
+    mode: "hosted", rig: "s21", ths: 200, watts: 3500, hostRate: 0.06, capex: 4000,
+    poolFeePct: 1.5, rigLifeYears: 5, refresh: true,
     rentPerThDay: 0.05, termYears: 4, feeBoost: 3, alpha: HASH_ALPHA_DEFAULT,
     opexFunding: "fiat", horizon: 10,
   });
   const upMine = (k, v) => setMine(s => ({ ...s, [k]: v }));
+  // pick a rig preset (seeds hashrate + power draw); editing a spec field flips to "custom"
+  const pickRig = (k) => { const r = ASIC_RIGS[k]; setMine(s => ({ ...s, rig: k, ...(r.ths ? { ths: r.ths, watts: r.watts } : {}) })); };
+  const upRigSpec = (k, v) => setMine(s => ({ ...s, [k]: v, rig: "custom" }));
 
   const p = scen[active];
   const up = (k, v) => setScen(s => ({ ...s, [active]: { ...s[active], [k]: v } }));
@@ -2470,14 +2484,22 @@ export default function App() {
                   <button className={`seg ${mine.mode === "rented" ? "on" : ""}`} style={{ flex: 1 }} onClick={() => upMine("mode", "rented")}>Rented hashrate</button>
                 </div>
               </Field>
-              <Field label="Your hashrate" suffix="TH/s"><NumIn value={mine.ths} onChange={v => upMine("ths", v)} step={10} /></Field>
-
               {mine.mode === "hosted" ? (
                 <>
-                  <Field label="Hardware cost" suffix="per TH/s"><NumIn value={mine.capexPerTh} onChange={v => upMine("capexPerTh", v)} prefix={cur} step={1} /></Field>
-                  <Field label="Efficiency" suffix="watts per TH/s"><NumIn value={mine.wPerTh} onChange={v => upMine("wPerTh", v)} step={1} /></Field>
-                  <Field label="Electricity price" suffix="per kWh"><NumIn value={mine.elecPrice} onChange={v => upMine("elecPrice", v)} prefix={cur} step={0.01} /></Field>
-                  <Field label="Hosting fee" suffix="per TH/s / day (extra)"><NumIn value={mine.hostFeePerThDay} onChange={v => upMine("hostFeePerThDay", v)} prefix={cur} step={0.005} /></Field>
+                  <Field label="Miner model">
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                      {Object.entries(ASIC_RIGS).map(([k, v]) => (
+                        <button key={k} className={`seg ${mine.rig === k ? "on" : ""}`} title={v.label}
+                          onClick={() => pickRig(k)} style={{ fontSize: 11, padding: "7px 4px" }}>{v.short}</button>
+                      ))}
+                    </div>
+                  </Field>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <div style={{ flex: 1 }}><Field label="Hashrate" suffix="TH/s"><NumIn value={mine.ths} onChange={v => upRigSpec("ths", v)} step={10} /></Field></div>
+                    <div style={{ flex: 1 }}><Field label="Power draw" suffix={mine.ths > 0 ? `${(mine.watts / mine.ths).toFixed(1)} W/TH` : "W"}><NumIn value={mine.watts} onChange={v => upRigSpec("watts", v)} step={50} /></Field></div>
+                  </div>
+                  <Field label="Hosting rate" suffix="all-in · power + facility"><NumIn value={mine.hostRate} onChange={v => upMine("hostRate", v)} prefix={cur} step={0.01} /></Field>
+                  <Field label="Hardware cost" suffix="total · 0 = ignore"><NumIn value={mine.capex} onChange={v => upMine("capex", v)} prefix={cur} step={100} /></Field>
                   <div style={{ display: "flex", gap: 12 }}>
                     <div style={{ flex: 1 }}><Field label="Rig lifetime" suffix="yrs"><NumIn value={mine.rigLifeYears} onChange={v => upMine("rigLifeYears", v)} step={1} /></Field></div>
                     <div style={{ flex: 1.3 }}><Field label="At end of life">
@@ -2490,6 +2512,7 @@ export default function App() {
                 </>
               ) : (
                 <>
+                  <Field label="Your hashrate" suffix="TH/s"><NumIn value={mine.ths} onChange={v => upMine("ths", v)} step={10} /></Field>
                   <Field label="Rental rate" suffix="per TH/s / day"><NumIn value={mine.rentPerThDay} onChange={v => upMine("rentPerThDay", v)} prefix={cur} step={0.005} /></Field>
                   <Field label="Contract length" suffix="yrs"><NumIn value={mine.termYears} onChange={v => upMine("termYears", v)} step={1} /></Field>
                 </>
