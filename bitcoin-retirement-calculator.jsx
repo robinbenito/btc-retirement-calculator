@@ -1017,6 +1017,7 @@ export default function App() {
   const [mcBusy, setMcBusy] = useState(false);
   const [live, setLive] = useState({ status: "loading" });
   const [chainHist, setChainHist] = useState({ status: "idle" });   // historical price + difficulty (Mining tab chart)
+  const [diffBack, setDiffBack] = useState("max");                  // model-basis chart x-axis window (years of history shown)
   const [showVolOpts, setShowVolOpts] = useState(false);
   const [showSens, setShowSens] = useState(false);
   const [pinAge, setPinAge] = useState(null);
@@ -1450,19 +1451,28 @@ export default function App() {
     for (let y = nowYear + 0.25; y <= nowYear + mine.horizon + 1e-6; y += 0.25) rows.push(enrich({ year: y }));
     rows.sort((a, b) => a.year - b.year);
 
-    // log axis domains — $ from price+curve (cost line may clip below via allowDataOverflow)
+    // visible x-window — Max = all history, otherwise last N years of history through the projection
+    const dataStart = Math.floor(rows[0].year);
+    const back = { max: Infinity, "20": 20, "10": 10, "5": 5, fwd: 0 }[diffBack] ?? Infinity;
+    const xFrom = back === Infinity ? dataStart : Math.max(dataStart, Math.floor(nowYear - back));
+    const xTo = Math.ceil(nowYear + mine.horizon);
+    const vis = rows.filter(r => r.year >= xFrom - 1e-9 && r.year <= xTo + 1e-9);
+    const visRows = vis.length ? vis : rows;
+
+    // log axis domains over the visible window so zooming rescales the axes
     const span = (vals) => {
       const ok = vals.filter(v => v != null && isFinite(v) && v > 0);
+      if (!ok.length) return { lo: 1, hi: 10, ticks: [1, 10] };
       const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...ok))));
       const hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...ok))));
       const ticks = []; for (let t = lo; t <= hi + 1e-9; t *= 10) ticks.push(t);
       return { lo, hi, ticks };
     };
-    const u = span(rows.flatMap(r => [r.price, r.curve]));
-    const d = span(rows.flatMap(r => [r.diff, r.diffModel]));
+    const u = span(visRows.flatMap(r => [r.price, r.curve]));
+    const d = span(visRows.flatMap(r => [r.diff, r.diffModel]));
     return { rows, usdLo: u.lo, usdHi: u.hi, usdTicks: u.ticks, diffLo: d.lo, diffHi: d.hi, diffTicks: d.ticks,
-      firstYear: Math.floor(rows[0].year), src: usingLive ? chainHist.src : "embedded year-end history" };
-  }, [tab, chainHist, mine, scen.A.fxRate, scen.A.spot, live]);
+      xFrom, xTo, firstYear: dataStart, src: usingLive ? chainHist.src : "embedded year-end history" };
+  }, [tab, chainHist, mine, scen.A.fxRate, scen.A.spot, live, diffBack]);
 
   const curLocalSpot = scen[active].spot;
   // the actual live price in local currency (distinct from the model's spot, which the user can edit) (#25)
@@ -2717,8 +2727,16 @@ export default function App() {
                   {/* model basis: difficulty vs price vs power law + cost to mine 1 BTC */}
                   {diffLens && (
                     <div className="card fade" style={{ padding: "20px 18px 16px" }}>
-                      <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim, marginBottom: 4 }}>
-                        Model basis · difficulty vs price
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+                        <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim }}>
+                          Model basis · difficulty vs price
+                        </div>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          {[["max", "Max"], ["20", "20Y"], ["10", "10Y"], ["5", "5Y"], ["fwd", "Proj"]].map(([k, lbl]) => (
+                            <button key={k} className={`seg ${diffBack === k ? "on" : ""}`} style={{ padding: "5px 9px", fontSize: 11 }}
+                              onClick={() => setDiffBack(k)}>{lbl}</button>
+                          ))}
+                        </div>
                       </div>
                       <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginBottom: 8, lineHeight: 1.45 }}>
                         Real difficulty tracks the price power law — that coupling (α) is what we extrapolate. The red line is what it costs to mine 1 BTC with your setup; where it crosses price, mining stops paying.
@@ -2726,7 +2744,7 @@ export default function App() {
                       <ResponsiveContainer width="100%" height={300}>
                         <ComposedChart data={diffLens.rows} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
                           <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
-                          <XAxis dataKey="year" type="number" domain={[diffLens.firstYear, Math.ceil(nowYear + mine.horizon)]} allowDecimals={false}
+                          <XAxis dataKey="year" type="number" domain={[diffLens.xFrom, diffLens.xTo]} allowDataOverflow allowDecimals={false}
                             stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} tickFormatter={v => `'${String(Math.round(v)).slice(2)}`} />
                           <YAxis yAxisId="usd" scale="log" domain={[diffLens.usdLo, diffLens.usdHi]} ticks={diffLens.usdTicks} allowDataOverflow
                             stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={v => fmtMoney(v, cur)} />
