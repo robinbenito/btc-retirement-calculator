@@ -207,6 +207,14 @@ const BTC_HISTORY = [
   [2016, 963], [2017, 13880], [2018, 3740], [2019, 7200], [2020, 29000],
   [2021, 46300], [2022, 16550], [2023, 42300], [2024, 93400],
 ];
+// approximate year-end network difficulty — illustrative history / offline fallback for the
+// difficulty-vs-price chart (live data from Blockchain.com when available)
+const BTC_DIFFICULTY = [
+  [2009, 1], [2010, 14484], [2011, 1090715], [2012, 3438909], [2013, 908350862],
+  [2014, 40007470271], [2015, 103880340815], [2016, 317688400354], [2017, 1873105475221],
+  [2018, 5106422924659], [2019, 13798783827516], [2020, 18599593048299], [2021, 24272331996979],
+  [2022, 35364065900457], [2023, 72006146478567], [2024, 109782403341621], [2025, 126411437451912],
+];
 
 /* Calibrated power-law fair value (BGeometrics/Santostasi):
    P ≈ 1.0117e-17 × (days since genesis)^5.82, floor ≈ 0.42 × fair. USD. */
@@ -258,10 +266,12 @@ const ASIC_RIGS = {
   custom: { short:"Custom",  label:"Custom",           ths:null, watts:null },
 };
 
-/* block subsidy at a future point, honouring the halving schedule */
+/* block subsidy at a point in time, honouring the halving schedule. Valid for the past too
+   (negative halvings → 50/25/12.5/6.25 for 2009/2013/2017/2021); for yearsOut ≥ 0 it is identical
+   to a clamped version, so the forward mining calc is unaffected. */
 function subsidyAt(yearsOut) {
   const year = nowYear + yearsOut;
-  const halvings = Math.max(0, Math.floor((year - LAST_HALVING_YEAR) / HALVING_YEARS));
+  const halvings = Math.floor((year - LAST_HALVING_YEAR) / HALVING_YEARS);
   return SUBSIDY_NOW / Math.pow(2, halvings);
 }
 /* projected network hashrate (H/s), coupled to the price model */
@@ -821,6 +831,23 @@ function MineTT({ active, payload, real, cur }) {
     </div>
   );
 }
+// Difficulty-vs-price chart tooltip: actual price + our power-law curve + cost-to-mine on the $
+// side, actual + model difficulty on the right. Each field may be null (history vs projection).
+function DiffTT({ active, payload, cur }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px",
+      fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
+      <div style={{ color: C.gold, marginBottom: 4 }}>Year {Math.round(d.year)}{d.year > nowYear ? " · projected" : ""}</div>
+      {d.price != null && <div style={{ color: C.ink }}>price {fmtMoney(d.price, cur)}</div>}
+      <div style={{ color: C.orange }}>power law {fmtMoney(d.curve, cur)}</div>
+      {d.costPerBtc != null && isFinite(d.costPerBtc) && <div style={{ color: C.red }}>cost/BTC {fmtMoney(d.costPerBtc, cur)}</div>}
+      {d.diff != null && <div style={{ color: C.blue, marginTop: 2 }}>difficulty {fmtMoney(d.diff, "")}</div>}
+      <div style={{ color: C.gold }}>model diff {fmtMoney(d.diffModel, "")}</div>
+    </div>
+  );
+}
 // Shared age / value / BTC axes for the portfolio + Monte-Carlo charts. Returns an array (not a
 // fragment) so recharts' React.Children walk flattens and detects each axis.
 const ageValBtcAxes = (cur) => [
@@ -989,6 +1016,7 @@ export default function App() {
   const [mc, setMc] = useState(null);
   const [mcBusy, setMcBusy] = useState(false);
   const [live, setLive] = useState({ status: "loading" });
+  const [chainHist, setChainHist] = useState({ status: "idle" });   // historical price + difficulty (Mining tab chart)
   const [showVolOpts, setShowVolOpts] = useState(false);
   const [showSens, setShowSens] = useState(false);
   const [pinAge, setPinAge] = useState(null);
@@ -1092,6 +1120,36 @@ export default function App() {
     setLive({ status: "fail" });
     return null;
   };
+
+  // Historical price + difficulty for the Mining-tab transparency chart. Blockchain.com charts API
+  // (CORS-enabled); downsampled to one point per month. Falls back to the embedded year-end series.
+  const fetchChainHistory = async () => {
+    setChainHist({ status: "loading" });
+    const toYear = (sec) => GENESIS_YEAR + ((sec * 1000 - GENESIS.getTime()) / MS_DAY) / 365.25;
+    const monthly = (values) => {
+      const m = new Map();
+      for (const { x, y } of values) {
+        const d = new Date(x * 1000);
+        m.set(d.getUTCFullYear() * 12 + d.getUTCMonth(), [toYear(x), y]);
+      }
+      return [...m.values()];
+    };
+    const chart = async (metric) => {
+      const r = await fetch(`https://api.blockchain.info/charts/${metric}?timespan=all&format=json&cors=true`);
+      if (!r.ok) throw new Error(metric);
+      const j = await r.json();
+      if (!Array.isArray(j.values) || !j.values.length) throw new Error(metric);
+      return j.values;
+    };
+    try {
+      const [diff, price] = await Promise.all([chart("difficulty"), chart("market-price")]);
+      setChainHist({ status: "ok", src: "Blockchain.com",
+        diff: monthly(diff), price: monthly(price).filter(p => p[1] > 0) });
+    } catch (e) {
+      setChainHist({ status: "fallback" });
+    }
+  };
+
   useEffect(() => { (async () => {
     const result = await fetchLive();
     if (result) {
@@ -1102,6 +1160,8 @@ export default function App() {
       setMc(buildMc({ A: { ...DEF_A, spot: spotVal, fxRate: fx } }, mcVol, mcPaths, false, "A"));
     }
   })(); }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  // lazily load the difficulty/price history the first time the Mining tab is opened
+  useEffect(() => { if (tab === "mining" && chainHist.status === "idle") fetchChainHistory(); }, [tab]);  // eslint-disable-line react-hooks/exhaustive-deps
   // When the user switches country, re-derive spot from the already-fetched prices
   useEffect(() => {
     if (live.status !== "ok" || !live.prices) return;
@@ -1348,6 +1408,61 @@ export default function App() {
   const mineResult = useMemo(() => tab === "mining"
     ? simulateMining({ ...mine, model: sharedModel, infl: scen.A.infl })
     : null, [mine, sharedModel, scen.A.infl, tab]);
+
+  // Difficulty-vs-price transparency chart: actual price + our power-law curve + cost-to-mine-1-BTC
+  // ($ axis), actual difficulty + our α-coupling model (right axis). History from live/fallback
+  // data; forward rows extrapolate the model out to the mining horizon.
+  const diffLens = useMemo(() => {
+    if (tab !== "mining") return null;
+    const fx = scen.A.fxRate ?? 1;
+    const usingLive = chainHist.status === "ok";
+    const priceSrc = usingLive ? chainHist.price : BTC_HISTORY.map(([y, v]) => [y + 0.96, v]);
+    const diffSrc = usingLive ? chainHist.diff : BTC_DIFFICULTY.map(([y, v]) => [y + 0.96, v]);
+    const diffNowActual = diffSrc.length ? diffSrc[diffSrc.length - 1][1] : 1.26e14;
+
+    // merge historical price + difficulty onto a per-month grid
+    const map = new Map();
+    const put = (arr, key) => arr.forEach(([y, v]) => {
+      if (y > nowYear) return;
+      const k = Math.round(y * 12);
+      const row = map.get(k) || { year: k / 12 };
+      row[key] = v; map.set(k, row);
+    });
+    put(priceSrc, "price"); put(diffSrc, "diff");
+
+    // cost-to-mine terms from the current setup (constant over time)
+    const myHs = mine.ths * 1e12, feeMult = 1 + mine.feeBoost / 100, poolKeep = 1 - mine.poolFeePct / 100;
+    const dailyOpex = mine.mode === "hosted" ? mine.watts / 1000 * 24 * mine.hostRate : mine.rentPerThDay * mine.ths;
+    const enrich = (row) => {
+      const days = daysNow + (row.year - nowYear) * 365.25;
+      row.curve = FV_A * Math.pow(days, FV_NREF) * fx;
+      if (row.price != null) row.price *= fx;
+      row.diffModel = diffNowActual * Math.pow(days / daysNow, FV_NREF * mine.alpha);
+      const netHs = (row.diff != null ? row.diff : row.diffModel) * Math.pow(2, 32) / 600;
+      const dailyBtc = (myHs / netHs) * 144 * subsidyAt(row.year - nowYear) * feeMult * poolKeep;
+      row.costPerBtc = dailyBtc > 0 ? dailyOpex / dailyBtc * fx : null;
+      return row;
+    };
+
+    const rows = [...map.values()].sort((a, b) => a.year - b.year).map(enrich);
+    const nowUSD = live.status === "ok" ? live.usd : scen.A.spot / (fx || 1);
+    rows.push(enrich({ year: nowYear, price: nowUSD, diff: diffNowActual }));
+    for (let y = nowYear + 0.25; y <= nowYear + mine.horizon + 1e-6; y += 0.25) rows.push(enrich({ year: y }));
+    rows.sort((a, b) => a.year - b.year);
+
+    // log axis domains — $ from price+curve (cost line may clip below via allowDataOverflow)
+    const span = (vals) => {
+      const ok = vals.filter(v => v != null && isFinite(v) && v > 0);
+      const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...ok))));
+      const hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...ok))));
+      const ticks = []; for (let t = lo; t <= hi + 1e-9; t *= 10) ticks.push(t);
+      return { lo, hi, ticks };
+    };
+    const u = span(rows.flatMap(r => [r.price, r.curve]));
+    const d = span(rows.flatMap(r => [r.diff, r.diffModel]));
+    return { rows, usdLo: u.lo, usdHi: u.hi, usdTicks: u.ticks, diffLo: d.lo, diffHi: d.hi, diffTicks: d.ticks,
+      firstYear: Math.floor(rows[0].year), src: usingLive ? chainHist.src : "embedded year-end history" };
+  }, [tab, chainHist, mine, scen.A.fxRate, scen.A.spot, live]);
 
   const curLocalSpot = scen[active].spot;
   // the actual live price in local currency (distinct from the model's spot, which the user can edit) (#25)
@@ -2598,6 +2713,49 @@ export default function App() {
                       <a href="https://medium.com/@fulgur.ventures/bitcoin-power-law-theory-executive-summary-report-837e6f00347e" target="_blank" rel="noopener noreferrer" style={{ color: C.blue }}>Power Law theory ↗</a>.
                     </div>
                   </div>
+
+                  {/* model basis: difficulty vs price vs power law + cost to mine 1 BTC */}
+                  {diffLens && (
+                    <div className="card fade" style={{ padding: "20px 18px 16px" }}>
+                      <div style={{ fontFamily: "'IBM Plex Sans',sans-serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.inkDim, marginBottom: 4 }}>
+                        Model basis · difficulty vs price
+                      </div>
+                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, marginBottom: 8, lineHeight: 1.45 }}>
+                        Real difficulty tracks the price power law — that coupling (α) is what we extrapolate. The red line is what it costs to mine 1 BTC with your setup; where it crosses price, mining stops paying.
+                      </div>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <ComposedChart data={diffLens.rows} margin={{ top: 14, right: 8, left: 4, bottom: 0 }}>
+                          <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+                          <XAxis dataKey="year" type="number" domain={[diffLens.firstYear, Math.ceil(nowYear + mine.horizon)]} allowDecimals={false}
+                            stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} tickFormatter={v => `'${String(Math.round(v)).slice(2)}`} />
+                          <YAxis yAxisId="usd" scale="log" domain={[diffLens.usdLo, diffLens.usdHi]} ticks={diffLens.usdTicks} allowDataOverflow
+                            stroke={C.inkFaint} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickLine={false} width={48} tickFormatter={v => fmtMoney(v, cur)} />
+                          <YAxis yAxisId="diff" orientation="right" scale="log" domain={[diffLens.diffLo, diffLens.diffHi]} ticks={diffLens.diffTicks} allowDataOverflow
+                            stroke={C.blue} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: C.blue }} tickLine={false} width={48} opacity={0.7} tickFormatter={v => fmtMoney(v, "")} />
+                          <Tooltip content={<DiffTT cur={cur} />} />
+                          <ReferenceLine x={nowYear} yAxisId="usd" stroke={C.gold} strokeDasharray="3 3"
+                            label={{ value: "now", fill: C.gold, fontSize: 10, position: "insideTopRight" }} />
+                          <Line yAxisId="diff" type="monotone" name="difficulty" dataKey="diff" stroke={C.blue} strokeWidth={2} dot={false} connectNulls />
+                          <Line yAxisId="diff" type="monotone" name="model diff" dataKey="diffModel" stroke={C.gold} strokeWidth={1.5} dot={false} strokeDasharray="5 3" connectNulls />
+                          <Line yAxisId="usd" type="monotone" name="power law" dataKey="curve" stroke={C.orange} strokeWidth={1.5} dot={false} connectNulls />
+                          <Line yAxisId="usd" type="monotone" name="price" dataKey="price" stroke={C.ink} strokeWidth={2} dot={false} connectNulls />
+                          <Line yAxisId="usd" type="monotone" name="cost/BTC" dataKey="costPerBtc" stroke={C.red} strokeWidth={2} dot={false} strokeDasharray="4 4" connectNulls />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: "8px 4px 0",
+                        fontFamily: "'IBM Plex Mono',monospace", fontSize: 10, color: C.inkDim }}>
+                        <span style={{ display: "flex", gap: 5, alignItems: "center" }}><span style={{ width: 12, height: 0, borderTop: `2px solid ${C.ink}` }} />price</span>
+                        <span style={{ display: "flex", gap: 5, alignItems: "center" }}><span style={{ width: 12, height: 0, borderTop: `2px solid ${C.orange}` }} />power law</span>
+                        <span style={{ display: "flex", gap: 5, alignItems: "center" }}><span style={{ width: 12, height: 0, borderTop: `2px dashed ${C.red}` }} />cost to mine 1 BTC</span>
+                        <span style={{ display: "flex", gap: 5, alignItems: "center" }}><span style={{ width: 12, height: 0, borderTop: `2px solid ${C.blue}` }} />difficulty</span>
+                        <span style={{ display: "flex", gap: 5, alignItems: "center" }}><span style={{ width: 12, height: 0, borderTop: `2px dashed ${C.gold}` }} />model diff (α={mine.alpha.toFixed(1)})</span>
+                      </div>
+                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: C.inkFaint, lineHeight: 1.5, marginTop: 10 }}>
+                        Left axis $ (price, power law, cost/BTC); right axis network difficulty. Data: {diffLens.src}
+                        {chainHist.status === "loading" ? " · loading live…" : chainHist.status === "fallback" ? " · live fetch failed, using embedded series" : ""}. History left of “now”, model projection to the right.
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </section>

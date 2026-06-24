@@ -43,6 +43,8 @@ Mining yield depends on future network difficulty, so the open question is how t
 
 Running costs can be **paid from pocket** (keep all mined BTC, the default — mine cheap, hold for appreciation) or **funded by selling** mined BTC. Anchors (network hashrate ≈960 EH/s, difficulty ≈125 T, subsidy 3.125 BTC) are calibrated to **June 2026** and meant to be refreshed; the coupling exponent and ASIC cost/efficiency curve (`NET_HASH_NOW`, `HASH_ALPHA_DEFAULT`, `ASIC_DECLINE`) are the main knobs to update as better data arrives. Sources: [Hashrate Index](https://hashrateindex.com/blog/difficulty-forecasting-101-for-bitcoin-miners-hosters-lenders-and-hashrate-traders/), [Power Law theory (Fulgur Ventures)](https://medium.com/@fulgur.ventures/bitcoin-power-law-theory-executive-summary-report-837e6f00347e).
 
+A **model-basis chart** in the Mining tab makes the coupling visible: it overlays actual BTC price, our power-law fair-value curve, actual network difficulty, the model-implied difficulty (the α coupling), and the **cost to mine 1 BTC** with the current setup — history on the left of "now", model projection to the right. Where the cost line crosses price, mining the current rig stops paying for itself. Historical price + difficulty load live from the [Blockchain.com charts API](https://www.blockchain.com/explorer/charts) with an embedded year-end series as offline fallback.
+
 ### Localization
 - Country/currency auto-detected by IP on first load (manual picks always win); the detected region is flagged in the picker.
 
